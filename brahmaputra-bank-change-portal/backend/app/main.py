@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from . import store
+
+FRONTEND_DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"
 
 app = FastAPI(
     title="Brahmaputra Bank Change Portal API",
@@ -143,3 +149,22 @@ def discover() -> dict:
         "message": "GEE discovery requires GEE_PROJECT and earthengine authenticate.",
         "next": "python -m processing.gee_discover",
     }
+
+
+if FRONTEND_DIST.exists():
+    assets = FRONTEND_DIST / "assets"
+    if assets.exists():
+        app.mount("/assets", StaticFiles(directory=assets), name="assets")
+
+    @app.get("/")
+    def spa_index() -> FileResponse:
+        return FileResponse(FRONTEND_DIST / "index.html")
+
+    @app.get("/{path:path}")
+    def spa_fallback(path: str) -> FileResponse:
+        if path.startswith("api/") or path == "api":
+            raise HTTPException(404, "not found")
+        candidate = FRONTEND_DIST / path
+        if candidate.is_file():
+            return FileResponse(candidate)
+        return FileResponse(FRONTEND_DIST / "index.html")

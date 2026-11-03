@@ -30,6 +30,14 @@ export interface EpochSummary {
   source: string
 }
 
+export interface Acquisition {
+  id: string
+  sensor: string
+  date: string
+  status: string
+  source: string
+}
+
 export interface ReachStat {
   reach_id: string
   chainage_start_m: number

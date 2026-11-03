@@ -59,7 +59,36 @@ select { height: 30px; border: 1px solid var(--line); background: #fff; }
 .status-list small { color: #7b8882; }
 
 .map-shell { position: relative; min-width: 0; background: #c9d2cc; }
-.map-canvas { height: 100%; width: 100%; }
+.map-canvas, .leaflet-container { height: 100%; width: 100%; }
+.map-legend {
+  position: absolute;
+  left: 12px;
+  top: 12px;
+  z-index: 500;
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  background: rgba(247, 249, 247, 0.94);
+  border: 1px solid var(--line);
+  font-size: 11px;
+  color: #31413b;
+  max-width: 220px;
+}
+.map-legend strong { font-size: 10px; letter-spacing: .08em; text-transform: uppercase; }
+.map-legend span { display: flex; align-items: center; gap: 8px; }
+.map-legend em { font-style: normal; color: #6a7872; font-size: 10px; margin-top: 4px; }
+.swatch, .dot { display: inline-block; border-radius: 2px; }
+.swatch { width: 14px; height: 8px; }
+.swatch.gold { background: #e9a23b; }
+.swatch.teal { background: #176d8d; }
+.swatch.rust { background: #c56c48; }
+.dot { width: 8px; height: 8px; border-radius: 50%; }
+.dot.red { background: #b5483e; }
+.dot.green { background: #3d7a62; }
+.endpoint-label {
+  font-weight: 600;
+  font-size: 11px;
+}
 
 .chart { height: 140px; background: #fff; border: 1px solid var(--line); margin: 8px 0; }
 .table-wrap { max-height: 240px; overflow: auto; border: 1px solid var(--line); background: #fff; }

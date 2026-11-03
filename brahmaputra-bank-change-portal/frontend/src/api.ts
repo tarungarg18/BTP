@@ -1,4 +1,4 @@
-import type { Comparison, EpochSummary, StudyArea } from './types'
+import type { Acquisition, Comparison, EpochSummary, StudyArea } from './types'
 
 const base = ''
 
@@ -11,6 +11,7 @@ async function getJson<T>(path: string): Promise<T> {
 export const api = {
   studyArea: () => getJson<StudyArea>('/api/study-area'),
   epochs: () => getJson<EpochSummary[]>('/api/epochs'),
+  acquisitions: () => getJson<Acquisition[]>('/api/acquisitions'),
   epochLayers: (id: string) => getJson<Record<string, GeoJSON.GeoJsonObject>>(`/api/epochs/${id}/layers`),
   reference: () => getJson<{ centerline: GeoJSON.FeatureCollection; reaches: { reach_id: string }[] }>('/api/reference'),
   comparisons: () => getJson<Array<Pick<Comparison, 'id' | 'epoch_a' | 'epoch_b' | 'epoch_a_id' | 'epoch_b_id' | 'tolerance_m' | 'disclaimer'>>>('/api/comparisons'),

@@ -11,7 +11,7 @@ import {
 import { Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 
 import { api } from './api'
-import type { Comparison, EpochSummary, ReachStat, StudyArea } from './types'
+import type { Acquisition, Comparison, EpochSummary, ReachStat, StudyArea } from './types'
 
 const MapWorkspace = lazy(() => import('./MapWorkspace'))
 
@@ -22,6 +22,7 @@ function statusLabel(status: string): string {
 export default function App(): React.JSX.Element {
   const [study, setStudy] = useState<StudyArea | null>(null)
   const [epochs, setEpochs] = useState<EpochSummary[]>([])
+  const [acquisitions, setAcquisitions] = useState<Acquisition[]>([])
   const [dateA, setDateA] = useState('')
   const [dateB, setDateB] = useState('')
   const [layersA, setLayersA] = useState<Record<string, GeoJSON.GeoJsonObject>>()
@@ -37,7 +38,7 @@ export default function App(): React.JSX.Element {
     banksA: true,
     banksB: true,
     centerline: true,
-    sections: true,
+    sections: false,
     change: true,
   })
   const [sensor, setSensor] = useState('all')
@@ -46,13 +47,15 @@ export default function App(): React.JSX.Element {
   useEffect(() => {
     void (async () => {
       try {
-        const [area, list, reference] = await Promise.all([
+        const [area, list, reference, acqs] = await Promise.all([
           api.studyArea(),
           api.epochs(),
           api.reference(),
+          api.acquisitions(),
         ])
         setStudy(area)
         setEpochs(list)
+        setAcquisitions(acqs)
         setCenterline(reference.centerline)
         const processed = list.filter((item) => item.status === 'processed')
         if (processed.length >= 2) {
@@ -215,7 +218,7 @@ export default function App(): React.JSX.Element {
           </p>
           <p className="eyebrow">Acquisition status</p>
           <ul className="status-list">
-            {epochs.map((item) => (
+            {(acquisitions.length ? acquisitions : epochs).map((item) => (
               <li key={item.id}>
                 <i className={item.status} />
                 {item.date}
@@ -237,6 +240,8 @@ export default function App(): React.JSX.Element {
           sections={layersB?.cross_sections ?? layersA?.cross_sections}
           changes={comparison?.bank_changes}
           polygons={comparison?.change_polygons}
+          endpoints={study?.endpoints}
+          revision={`${dateA}__${dateB}`}
           showEnvelopeA={toggles.envelopeA}
           showEnvelopeB={toggles.envelopeB}
           showBanksA={toggles.banksA}
@@ -289,8 +294,18 @@ export default function App(): React.JSX.Element {
             <div className="inspect">
               <MapPinned size={14} />
               <strong>Section {String(section.section_id ?? '')}</strong>
-              <p>Chainage {String(section.chainage_m ?? '')} m</p>
-              <p>Width {String(section.width_m ?? '—')} m · QC {String(section.qc_flag ?? '')}</p>
+              <p>Reach {String(section.reach_id ?? '—')} · chainage {String(section.chainage_m ?? '')} m</p>
+              <p>
+                Width A {String(section.width_a_m ?? section.width_m ?? '—')} m
+                {section.width_b_m != null ? ` · Width B ${String(section.width_b_m)} m` : ''}
+              </p>
+              {section.left_delta_m != null && (
+                <p>Left Δ {String(section.left_delta_m)} m · {statusLabel(String(section.left_class ?? ''))}</p>
+              )}
+              {section.right_delta_m != null && (
+                <p>Right Δ {String(section.right_delta_m)} m · {statusLabel(String(section.right_class ?? ''))}</p>
+              )}
+              {section.qc_flag != null && <p>QC {String(section.qc_flag)}</p>}
             </div>
           )}
         </aside>
