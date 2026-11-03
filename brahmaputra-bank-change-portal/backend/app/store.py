@@ -8,9 +8,9 @@ STORE_PATH = Path(__file__).resolve().parents[2] / "data" / "store.json"
 
 def load() -> dict:
     if not STORE_PATH.exists():
-        from processing.bootstrap import run
-
-        run()
+        raise FileNotFoundError(
+            "No satellite water store yet. Run: python -m processing.ingest"
+        )
     return json.loads(STORE_PATH.read_text())
 
 

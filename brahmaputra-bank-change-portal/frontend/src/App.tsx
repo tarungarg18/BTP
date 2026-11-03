@@ -1,13 +1,5 @@
 import { lazy, Suspense, useEffect, useMemo, useState } from 'react'
-import {
-  AlertTriangle,
-  GitCompare,
-  Layers3,
-  Loader2,
-  MapPinned,
-  Radar,
-  Waves,
-} from 'lucide-react'
+import { AlertTriangle, GitCompare, Loader2, MapPinned, Waves } from 'lucide-react'
 import { Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 
 import { api } from './api'
@@ -33,16 +25,14 @@ export default function App(): React.JSX.Element {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [toggles, setToggles] = useState({
-    envelopeA: true,
-    envelopeB: true,
-    banksA: true,
+    waterA: true,
+    waterB: true,
+    banksA: false,
     banksB: true,
     centerline: true,
     sections: false,
     change: true,
   })
-  const [sensor, setSensor] = useState('all')
-  const [month, setMonth] = useState('all')
 
   useEffect(() => {
     void (async () => {
@@ -78,14 +68,6 @@ export default function App(): React.JSX.Element {
     [epochs],
   )
 
-  const visibleEpochs = useMemo(() => {
-    return epochs.filter((item) => {
-      if (sensor !== 'all' && !item.sensors.includes(sensor)) return false
-      if (month !== 'all' && !item.date.startsWith(month)) return false
-      return true
-    })
-  }, [epochs, month, sensor])
-
   useEffect(() => {
     void (async () => {
       const a = processed.find((item) => item.date === dateA)
@@ -118,7 +100,7 @@ export default function App(): React.JSX.Element {
 
   const chartData =
     comparison?.reach_statistics?.map((row: ReachStat) => ({
-      reach: row.reach_id,
+      km: Math.round(row.chainage_start_m / 1000),
       widthA: row.mean_width_a_m,
       widthB: row.mean_width_b_m,
     })) ?? []
@@ -127,8 +109,9 @@ export default function App(): React.JSX.Element {
     return (
       <div className="fatal">
         <AlertTriangle />
-        <p>The portal could not reach the API. Start FastAPI on port 8000.</p>
+        <p>The portal could not load satellite water yet.</p>
         <small>{error}</small>
+        <small>On the server run: python -m processing.ingest</small>
       </div>
     )
   }
@@ -139,69 +122,58 @@ export default function App(): React.JSX.Element {
         <div className="brand">
           <Waves size={20} />
           <div>
-            <h1>Brahmaputra Bank Change Portal</h1>
-            <span>Assam main stem · Sadiya to Dhubri · unvalidated prototype</span>
+            <h1>Brahmaputra bank change</h1>
+            <span>Assam main stem · Sadiya to Dhubri · satellite water, not a field survey</span>
           </div>
         </div>
         <div className="header-meta">
-          <span className="badge">CANDIDATE CHANGE</span>
-          <span>{study ? `${(study.corridor_length_m / 1000).toFixed(0)} km corridor` : '…'}</span>
+          <span className="badge">CANDIDATE CHANGE ONLY</span>
+          <span>{study ? `${(study.corridor_length_m / 1000).toFixed(0)} km` : '…'}</span>
           {loading && <Loader2 className="spin" size={16} />}
         </div>
       </header>
 
       <div className="workspace">
         <aside className="panel left">
-          <p className="eyebrow">Observations</p>
-          <div className="row">
-            <label>
-              Sensor
-              <select value={sensor} onChange={(event) => setSensor(event.target.value)}>
-                <option value="all">All</option>
-                <option value="sentinel-1">Sentinel-1 SAR</option>
-                <option value="sentinel-2">Sentinel-2 optical</option>
-                <option value="landsat">Landsat</option>
-              </select>
-            </label>
-            <label>
-              Month
-              <select value={month} onChange={(event) => setMonth(event.target.value)}>
-                <option value="all">All</option>
-                {[...new Set(epochs.map((item) => item.date.slice(0, 7)))].map((value) => (
-                  <option key={value} value={value}>{value}</option>
-                ))}
-              </select>
-            </label>
-          </div>
+          <p className="read-me">
+            You are looking at <strong>real Sentinel water</strong> on the satellite photo.
+            If a line leaves the visible river, it is wrong. The old white tube was a
+            search corridor, not the Brahmaputra — that overlay has been removed.
+          </p>
           <button type="button" className="primary" onClick={latestVsPrevious}>
-            <GitCompare size={15} /> Latest vs Previous
+            <GitCompare size={15} /> Latest vs previous date
           </button>
           <label>
-            Date A
+            Earlier date
             <select value={dateA} onChange={(event) => setDateA(event.target.value)}>
-              {visibleEpochs.map((item) => (
-                <option key={item.id} value={item.date}>{item.date} · {item.sensors.join(',')}</option>
+              {processed.map((item) => (
+                <option key={item.id} value={item.date}>
+                  {item.date} · {item.sensors.join(', ')} · {item.scene_count ?? '?'} scenes
+                </option>
               ))}
             </select>
           </label>
           <label>
-            Date B
+            Later date
             <select value={dateB} onChange={(event) => setDateB(event.target.value)}>
-              {visibleEpochs.map((item) => (
-                <option key={item.id} value={item.date}>{item.date} · {item.sensors.join(',')}</option>
+              {processed.map((item) => (
+                <option key={item.id} value={item.date}>
+                  {item.date} · {item.sensors.join(', ')} · {item.scene_count ?? '?'} scenes
+                </option>
               ))}
             </select>
           </label>
-          <p className="eyebrow">Layers</p>
+
+          <p className="eyebrow">Show on the map</p>
           {(
             [
-              ['envelopeA', 'Envelope A'],
-              ['envelopeB', 'Envelope B'],
-              ['banksA', 'Proxy banks A'],
-              ['banksB', 'Proxy banks B'],
-              ['centerline', 'Reference centerline'],
-              ['sections', '300 m sections'],
-              ['change', 'Candidate change'],
+              ['waterA', 'Water on earlier date'],
+              ['waterB', 'Water on later date'],
+              ['banksA', 'Banks, earlier date'],
+              ['banksB', 'Banks, later date (looking downstream)'],
+              ['centerline', 'Channel centre'],
+              ['sections', 'Width ticks (every 900 m)'],
+              ['change', 'Where the outer water moved'],
             ] as const
           ).map(([key, label]) => (
             <label key={key} className="check">
@@ -213,10 +185,16 @@ export default function App(): React.JSX.Element {
               {label}
             </label>
           ))}
-          <p className="note">
-            <Layers3 size={13} /> Outer boundaries are satellite proxy banklines, not confirmed geomorphic banks.
-          </p>
-          <p className="eyebrow">Acquisition status</p>
+
+          <p className="eyebrow">How this is calculated</p>
+          <ol className="how">
+            {(study?.how_calculated ?? []).map((line) => (
+              <li key={line}>{line}</li>
+            ))}
+          </ol>
+          <p className="note source">{study?.source}</p>
+
+          <p className="eyebrow">Scenes used</p>
           <ul className="status-list">
             {(acquisitions.length ? acquisitions : epochs).map((item) => (
               <li key={item.id}>
@@ -229,42 +207,44 @@ export default function App(): React.JSX.Element {
         </aside>
 
         <Suspense fallback={<main className="map-shell" />}>
-        <MapWorkspace
-          envelopeA={layersA?.river_envelope}
-          envelopeB={layersB?.river_envelope}
-          leftA={layersA?.left_bank}
-          rightA={layersA?.right_bank}
-          leftB={layersB?.left_bank}
-          rightB={layersB?.right_bank}
-          centerline={centerline}
-          sections={layersB?.cross_sections ?? layersA?.cross_sections}
-          changes={comparison?.bank_changes}
-          polygons={comparison?.change_polygons}
-          endpoints={study?.endpoints}
-          revision={`${dateA}__${dateB}`}
-          showEnvelopeA={toggles.envelopeA}
-          showEnvelopeB={toggles.envelopeB}
-          showBanksA={toggles.banksA}
-          showBanksB={toggles.banksB}
-          showCenterline={toggles.centerline}
-          showSections={toggles.sections}
-          showChange={toggles.change}
-          onSection={setSection}
-        />
+          <MapWorkspace
+            waterA={layersA?.river_only}
+            waterB={layersB?.river_only}
+            leftA={layersA?.left_bank}
+            rightA={layersA?.right_bank}
+            leftB={layersB?.left_bank}
+            rightB={layersB?.right_bank}
+            centerline={centerline}
+            sections={layersB?.cross_sections ?? layersA?.cross_sections}
+            polygons={comparison?.change_polygons}
+            endpoints={study?.endpoints}
+            revision={`${dateA}__${dateB}`}
+            showWaterA={toggles.waterA}
+            showWaterB={toggles.waterB}
+            showBanksA={toggles.banksA}
+            showBanksB={toggles.banksB}
+            showCenterline={toggles.centerline}
+            showSections={toggles.sections}
+            showChange={toggles.change}
+            onSection={setSection}
+          />
         </Suspense>
 
         <aside className="panel right">
-          <p className="eyebrow">Reach statistics</p>
-          <h2>{dateA && dateB ? `${dateA} → ${dateB}` : 'Select two dates'}</h2>
-          <p className="note"><Radar size={13} /> Candidate change. Water level can mimic bank movement.</p>
+          <p className="eyebrow">Width along the river</p>
+          <h2>{dateA && dateB ? `${dateA}  →  ${dateB}` : 'Select two dates'}</h2>
+          <p className="note">
+            Positive bank shift = water edge moved outward (candidate erosion).
+            A higher river stage can look the same. This is not a warning product.
+          </p>
           <div className="chart">
             <ResponsiveContainer width="100%" height="100%">
               <LineChart data={chartData}>
-                <XAxis dataKey="reach" tick={{ fontSize: 9 }} />
+                <XAxis dataKey="km" tick={{ fontSize: 9 }} label={{ value: 'km from Sadiya', fontSize: 10, position: 'insideBottom', offset: -2 }} />
                 <YAxis tick={{ fontSize: 9 }} />
                 <Tooltip />
-                <Line type="monotone" dataKey="widthA" stroke="#176d8d" dot={false} name="Width A" />
-                <Line type="monotone" dataKey="widthB" stroke="#c56c48" dot={false} name="Width B" />
+                <Line type="monotone" dataKey="widthA" stroke="#176d8d" dot={false} name="Width earlier (m)" />
+                <Line type="monotone" dataKey="widthB" stroke="#c56c48" dot={false} name="Width later (m)" />
               </LineChart>
             </ResponsiveContainer>
           </div>
@@ -272,19 +252,21 @@ export default function App(): React.JSX.Element {
             <table>
               <thead>
                 <tr>
-                  <th>Reach</th>
-                  <th>ΔL m</th>
-                  <th>ΔR m</th>
-                  <th>Max retreat</th>
+                  <th>km</th>
+                  <th>Width A</th>
+                  <th>Width B</th>
+                  <th>Left Δ m</th>
+                  <th>Right Δ m</th>
                 </tr>
               </thead>
               <tbody>
-                {(comparison?.reach_statistics ?? []).slice(0, 12).map((row) => (
+                {(comparison?.reach_statistics ?? []).slice(0, 16).map((row) => (
                   <tr key={row.reach_id}>
-                    <td>{row.reach_id}</td>
+                    <td>{Math.round(row.chainage_start_m / 1000)}</td>
+                    <td>{row.mean_width_a_m ?? '—'}</td>
+                    <td>{row.mean_width_b_m ?? '—'}</td>
                     <td>{row.mean_left_delta_m ?? '—'}</td>
                     <td>{row.mean_right_delta_m ?? '—'}</td>
-                    <td>{row.max_retreat_m}</td>
                   </tr>
                 ))}
               </tbody>
@@ -293,26 +275,19 @@ export default function App(): React.JSX.Element {
           {section && (
             <div className="inspect">
               <MapPinned size={14} />
-              <strong>Section {String(section.section_id ?? '')}</strong>
-              <p>Reach {String(section.reach_id ?? '—')} · chainage {String(section.chainage_m ?? '')} m</p>
+              <strong>{String(section.section_id ?? 'Section')}</strong>
+              <p>{Math.round(Number(section.chainage_m ?? 0) / 1000)} km from Sadiya</p>
               <p>
-                Width A {String(section.width_a_m ?? section.width_m ?? '—')} m
-                {section.width_b_m != null ? ` · Width B ${String(section.width_b_m)} m` : ''}
+                Width {String(section.width_a_m ?? section.width_m ?? '—')} m
+                {section.width_b_m != null ? ` → ${String(section.width_b_m)} m` : ''}
               </p>
-              {section.left_delta_m != null && (
-                <p>Left Δ {String(section.left_delta_m)} m · {statusLabel(String(section.left_class ?? ''))}</p>
-              )}
-              {section.right_delta_m != null && (
-                <p>Right Δ {String(section.right_delta_m)} m · {statusLabel(String(section.right_class ?? ''))}</p>
-              )}
-              {section.qc_flag != null && <p>QC {String(section.qc_flag)}</p>}
             </div>
           )}
         </aside>
       </div>
 
       <footer className="footer">
-        <span>OSM + Esri basemap · Assam main stem only</span>
+        <span>Esri imagery · click a width tick to inspect</span>
         <span>{study?.disclaimer}</span>
       </footer>
     </div>

@@ -19,6 +19,9 @@ export interface StudyArea {
   corridor_length_m: number
   disclaimer: string
   operational_pixel_m: number
+  source?: string
+  how_calculated?: string[]
+  gee?: { available: boolean; reason?: string; project?: string }
 }
 
 export interface EpochSummary {
@@ -28,6 +31,8 @@ export interface EpochSummary {
   status: Status
   validation_status: string
   source: string
+  method?: string
+  scene_count?: number
 }
 
 export interface Acquisition {
@@ -36,6 +41,8 @@ export interface Acquisition {
   date: string
   status: string
   source: string
+  scene_count?: number
+  method?: string
 }
 
 export interface ReachStat {

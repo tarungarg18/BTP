@@ -135,7 +135,7 @@ def cross_sections(
                 (pt.x + nx * ABNORMAL_WIDTH_M, pt.y + ny * ABNORMAL_WIDTH_M),
             ]
         )
-        hit = ray.intersection(envelope.exterior)
+        hit = ray.intersection(envelope)
         qc = "ok"
         left_pt = None
         right_pt = None
@@ -147,8 +147,21 @@ def cross_sections(
                 points = [hit]
             elif hit.geom_type == "MultiPoint":
                 points = list(hit.geoms)
+            elif hit.geom_type == "LineString":
+                points = [Point(hit.coords[0]), Point(hit.coords[-1])]
+            elif hit.geom_type == "MultiLineString":
+                points = []
+                for part in hit.geoms:
+                    points.append(Point(part.coords[0]))
+                    points.append(Point(part.coords[-1]))
             elif hit.geom_type == "GeometryCollection":
-                points = [g for g in hit.geoms if g.geom_type == "Point"]
+                points = []
+                for g in hit.geoms:
+                    if g.geom_type == "Point":
+                        points.append(g)
+                    elif g.geom_type == "LineString" and len(g.coords) >= 2:
+                        points.append(Point(g.coords[0]))
+                        points.append(Point(g.coords[-1]))
             else:
                 points = []
             if len(points) < 2:
@@ -198,6 +211,14 @@ def cross_sections(
             "epoch_date": epoch_date,
             "qc_flag": qc,
         }
+        if left_pt is not None:
+            lll = to_lonlat(left_pt, bundle)
+            props["left_lon"] = round(lll.x, 6)
+            props["left_lat"] = round(lll.y, 6)
+        if right_pt is not None:
+            rll = to_lonlat(right_pt, bundle)
+            props["right_lon"] = round(rll.x, 6)
+            props["right_lat"] = round(rll.y, 6)
         samples.append(props)
         geom = ray if left_pt is None else LineString(
             [

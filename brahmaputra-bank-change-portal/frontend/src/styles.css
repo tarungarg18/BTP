@@ -35,8 +35,25 @@ html, body, #root { margin: 0; height: 100%; }
 .header-meta { display: flex; gap: 10px; align-items: center; font-size: 11px; }
 .badge { border: 1px solid #64583e; color: #efcf8d; padding: 4px 7px; font-size: 9px; letter-spacing: .08em; }
 
-.workspace { display: grid; grid-template-columns: 270px minmax(0, 1fr) 320px; min-height: 0; }
+.workspace { display: grid; grid-template-columns: 300px minmax(0, 1fr) 300px; min-height: 0; }
 .panel { overflow: auto; background: var(--panel); padding: 14px; }
+.read-me {
+  font-size: 12px;
+  line-height: 1.45;
+  color: #24332e;
+  background: #fff;
+  border: 1px solid var(--line);
+  padding: 10px;
+  margin: 0 0 12px;
+}
+.how {
+  margin: 0 0 10px;
+  padding-left: 18px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: #3e4d47;
+}
+.note.source { display: block; margin-top: 4px; }
 .left { border-right: 1px solid var(--line); }
 .right { border-left: 1px solid var(--line); }
 .eyebrow { margin: 12px 0 6px; font-size: 9px; letter-spacing: .12em; text-transform: uppercase; color: #71807a; }

@@ -26,7 +26,21 @@ app.add_middleware(
 
 @app.get("/api/health")
 def health() -> dict:
-    return {"ok": True}
+    from processing.gee_init import gee_status
+
+    return {"ok": True, "gee": gee_status(), "store": store.STORE_PATH.exists()}
+
+
+@app.get("/api/method")
+def method() -> dict:
+    data = store.load()
+    area = data["study_area"]
+    return {
+        "how_calculated": area.get("how_calculated", []),
+        "source": area.get("source"),
+        "gee": area.get("gee"),
+        "disclaimer": area.get("disclaimer"),
+    }
 
 
 @app.get("/api/study-area")
@@ -63,6 +77,8 @@ def epochs() -> list:
             "status": e["status"],
             "validation_status": e["validation_status"],
             "source": e["source"],
+            "method": e.get("method"),
+            "scene_count": e.get("scene_count"),
         }
         for e in data["epochs"]
     ]
@@ -144,11 +160,29 @@ def make_comparison(payload: dict) -> dict:
 
 @app.post("/api/processing/discover")
 def discover() -> dict:
+    from processing.gee_init import gee_status
+
+    status = gee_status()
+    if not status["available"]:
+        return {
+            "status": "blocked",
+            "message": "Google Earth Engine is not logged in.",
+            "gee": status,
+            "next": "export GEE_PROJECT=your-ee-project && earthengine authenticate && python -m processing.ingest",
+        }
     return {
-        "status": "queued",
-        "message": "GEE discovery requires GEE_PROJECT and earthengine authenticate.",
-        "next": "python -m processing.gee_discover",
+        "status": "ok",
+        "gee": status,
+        "next": "python -m processing.ingest",
     }
+
+
+@app.post("/api/processing/ingest")
+def ingest() -> dict:
+    from processing.ingest import run
+
+    path = run()
+    return {"status": "processed", "store": str(path)}
 
 
 if FRONTEND_DIST.exists():

@@ -8,9 +8,9 @@ import {
   ZoomControl,
   useMap,
 } from 'react-leaflet'
-import type { Feature, FeatureCollection, GeoJsonObject } from 'geojson'
+import type { FeatureCollection, GeoJsonObject } from 'geojson'
 import L from 'leaflet'
-import { useEffect, useMemo, useRef } from 'react'
+import { useEffect } from 'react'
 import 'leaflet/dist/leaflet.css'
 
 interface Endpoints {
@@ -19,20 +19,19 @@ interface Endpoints {
 }
 
 interface MapWorkspaceProps {
-  envelopeA?: GeoJsonObject
-  envelopeB?: GeoJsonObject
+  waterA?: GeoJsonObject
+  waterB?: GeoJsonObject
   leftA?: GeoJsonObject
   rightA?: GeoJsonObject
   leftB?: GeoJsonObject
   rightB?: GeoJsonObject
   centerline?: GeoJsonObject
   sections?: GeoJsonObject
-  changes?: FeatureCollection
   polygons?: FeatureCollection
   endpoints?: Endpoints
   revision: string
-  showEnvelopeA: boolean
-  showEnvelopeB: boolean
+  showWaterA: boolean
+  showWaterB: boolean
   showBanksA: boolean
   showBanksB: boolean
   showCenterline: boolean
@@ -41,101 +40,75 @@ interface MapWorkspaceProps {
   onSection: (props: Record<string, unknown>) => void
 }
 
-function FitCorridor({ data }: { data?: GeoJsonObject }) {
+function FitRiver({ data, revision }: { data?: GeoJsonObject; revision: string }) {
   const map = useMap()
-  const fitted = useRef(false)
   useEffect(() => {
-    if (!data || fitted.current) return
+    if (!data) return
     const layer = L.geoJSON(data as GeoJSON.GeoJsonObject)
     const bounds = layer.getBounds()
     if (bounds.isValid()) {
-      map.fitBounds(bounds, { padding: [36, 36], maxZoom: 8 })
-      fitted.current = true
+      map.fitBounds(bounds, { padding: [28, 28], maxZoom: 11 })
     }
-  }, [data, map])
+  }, [data, map, revision])
   return null
 }
 
-function styleEnvelope(color: string, opacity: number) {
-  return { color, weight: 1.5, fillColor: color, fillOpacity: opacity }
-}
-
 export default function MapWorkspace(props: MapWorkspaceProps): React.JSX.Element {
-  const changePointStyle = useMemo(() => {
-    return (feature?: Feature) => {
-      const cls = String(feature?.properties?.left_class ?? 'stable')
-      const color =
-        cls === 'candidate_erosion' ? '#b5483e' : cls === 'candidate_accretion' ? '#3d7a62' : '#8a938e'
-      return {
-        radius: 5,
-        color: '#fff',
-        weight: 1,
-        fillColor: color,
-        fillOpacity: 0.95,
-      }
-    }
-  }, [])
-
   return (
-    <main className="map-shell" aria-label="Assam Brahmaputra corridor map">
+    <main className="map-shell" aria-label="Assam Brahmaputra satellite water map">
       <MapContainer
         center={[26.7, 93.0]}
         zoom={7}
         minZoom={6}
-        maxZoom={14}
+        maxZoom={15}
         zoomControl={false}
         preferCanvas
         className="map-canvas"
       >
-        <FitCorridor data={props.centerline ?? props.envelopeA} />
-        <TileLayer
-          attribution="&copy; OpenStreetMap"
-          url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-        />
+        <FitRiver data={props.waterB ?? props.waterA ?? props.centerline} revision={props.revision} />
         <TileLayer
           url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
-          opacity={0.55}
           attribution="Tiles &copy; Esri"
         />
-        {props.showEnvelopeA && props.envelopeA && (
+        {props.showWaterA && props.waterA && (
           <GeoJSON
-            key={`envA-${props.revision}`}
-            data={props.envelopeA}
-            style={styleEnvelope('#176d8d', 0.28)}
+            key={`wA-${props.revision}`}
+            data={props.waterA}
+            style={{ color: '#0b4c70', weight: 0.8, fillColor: '#1d6fa3', fillOpacity: 0.38 }}
           />
         )}
-        {props.showEnvelopeB && props.envelopeB && (
+        {props.showWaterB && props.waterB && (
           <GeoJSON
-            key={`envB-${props.revision}`}
-            data={props.envelopeB}
-            style={styleEnvelope('#c56c48', 0.22)}
+            key={`wB-${props.revision}`}
+            data={props.waterB}
+            style={{ color: '#c05621', weight: 1.6, fillColor: '#e07a3d', fillOpacity: 0.18 }}
           />
         )}
         {props.showCenterline && props.centerline && (
           <GeoJSON
             key={`cl-${props.revision}`}
             data={props.centerline}
-            style={{ color: '#e9a23b', weight: 3 }}
+            style={{ color: '#f2c14e', weight: 2.4 }}
           />
         )}
         {props.showBanksA && props.leftA && (
-          <GeoJSON key={`lA-${props.revision}`} data={props.leftA} style={{ color: '#2f6f8f', weight: 3 }} />
+          <GeoJSON key={`lA-${props.revision}`} data={props.leftA} style={{ color: '#245e78', weight: 2 }} />
         )}
         {props.showBanksA && props.rightA && (
-          <GeoJSON key={`rA-${props.revision}`} data={props.rightA} style={{ color: '#1f4f66', weight: 3 }} />
+          <GeoJSON key={`rA-${props.revision}`} data={props.rightA} style={{ color: '#163e50', weight: 2 }} />
         )}
         {props.showBanksB && props.leftB && (
           <GeoJSON
             key={`lB-${props.revision}`}
             data={props.leftB}
-            style={{ color: '#c56c48', weight: 3, dashArray: '6 4' }}
+            style={{ color: '#c05621', weight: 2.4, dashArray: '7 4' }}
           />
         )}
         {props.showBanksB && props.rightB && (
           <GeoJSON
             key={`rB-${props.revision}`}
             data={props.rightB}
-            style={{ color: '#9a4b32', weight: 3, dashArray: '6 4' }}
+            style={{ color: '#8a3a16', weight: 2.4, dashArray: '7 4' }}
           />
         )}
         {props.showChange && props.polygons && (
@@ -145,22 +118,12 @@ export default function MapWorkspace(props: MapWorkspaceProps): React.JSX.Elemen
             style={(feature) => {
               const cls = String(feature?.properties?.class)
               if (cls === 'candidate_corridor_expansion') {
-                return { color: '#b5483e', fillColor: '#b5483e', fillOpacity: 0.32, weight: 0.5 }
+                return { color: '#b5483e', fillColor: '#b5483e', fillOpacity: 0.45, weight: 0.6 }
               }
               if (cls === 'candidate_corridor_contraction') {
-                return { color: '#3d7a62', fillColor: '#3d7a62', fillOpacity: 0.32, weight: 0.5 }
+                return { color: '#2f7a5e', fillColor: '#2f7a5e', fillOpacity: 0.45, weight: 0.6 }
               }
-              return { color: '#88938e', fillOpacity: 0.04, weight: 0 }
-            }}
-          />
-        )}
-        {props.showChange && props.changes && (
-          <GeoJSON
-            key={`chg-${props.revision}`}
-            data={props.changes}
-            pointToLayer={(feature, latlng) => L.circleMarker(latlng, changePointStyle(feature))}
-            onEachFeature={(feature, layer) => {
-              layer.on('click', () => props.onSection(feature.properties ?? {}))
+              return { color: '#88938e', fillOpacity: 0, weight: 0 }
             }}
           />
         )}
@@ -168,7 +131,7 @@ export default function MapWorkspace(props: MapWorkspaceProps): React.JSX.Elemen
           <GeoJSON
             key={`xs-${props.revision}`}
             data={props.sections}
-            style={{ color: '#31413b', weight: 1, opacity: 0.45 }}
+            style={{ color: '#f4f1ea', weight: 1, opacity: 0.7 }}
             onEachFeature={(feature, layer) => {
               layer.on('click', () => props.onSection(feature.properties ?? {}))
             }}
@@ -178,20 +141,20 @@ export default function MapWorkspace(props: MapWorkspaceProps): React.JSX.Elemen
           <>
             <CircleMarker
               center={[props.endpoints.upstream.lat, props.endpoints.upstream.lon]}
-              radius={8}
+              radius={7}
               pathOptions={{ color: '#fff', weight: 2, fillColor: '#0d6662', fillOpacity: 1 }}
             >
               <Tooltip permanent direction="right" offset={[10, 0]} className="endpoint-label">
-                {props.endpoints.upstream.name} · upstream
+                {props.endpoints.upstream.name}
               </Tooltip>
             </CircleMarker>
             <CircleMarker
               center={[props.endpoints.downstream.lat, props.endpoints.downstream.lon]}
-              radius={8}
+              radius={7}
               pathOptions={{ color: '#fff', weight: 2, fillColor: '#c56c48', fillOpacity: 1 }}
             >
               <Tooltip permanent direction="top" offset={[0, -8]} className="endpoint-label">
-                {props.endpoints.downstream.name} · downstream
+                {props.endpoints.downstream.name}
               </Tooltip>
             </CircleMarker>
           </>
@@ -200,13 +163,13 @@ export default function MapWorkspace(props: MapWorkspaceProps): React.JSX.Elemen
         <ScaleControl position="bottomleft" imperial={false} />
       </MapContainer>
       <div className="map-legend">
-        <strong>Assam main stem</strong>
-        <span><i className="swatch gold" /> Reference centerline</span>
-        <span><i className="swatch teal" /> Envelope / banks A</span>
-        <span><i className="swatch rust" /> Envelope / banks B</span>
-        <span><i className="dot red" /> Candidate erosion</span>
-        <span><i className="dot green" /> Candidate accretion</span>
-        <em>Click a red point or a 300 m section to inspect.</em>
+        <strong>What the colours mean</strong>
+        <span><i className="swatch teal" /> Water on the earlier date</span>
+        <span><i className="swatch rust" /> Water on the later date</span>
+        <span><i className="swatch gold" /> Middle of the channel</span>
+        <span><i className="dot red" /> River got wider (candidate erosion)</span>
+        <span><i className="dot green" /> River got narrower (candidate accretion)</span>
+        <em>Zoom in. The blue fill should sit on the real Brahmaputra in the satellite photo — not as a straight tube across land.</em>
       </div>
     </main>
   )
