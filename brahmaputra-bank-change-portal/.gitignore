@@ -1,0 +1,8 @@
+frontend/node_modules
+frontend/dist
+frontend/tsconfig.tsbuildinfo
+__pycache__/
+*.pyc
+data/store.json
+data/rasters/
+.venv
