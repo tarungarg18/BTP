@@ -1,47 +1,31 @@
-# Guwahati Disaster Intelligence
+# Brahmaputra Bank Change Portal
 
-Frontend-first BTech prototype for GIS-based hazard analysis and risk
-visualization in Guwahati, Assam.
+Assam main stem, Sadiya to Dhubri. Choose a start date and an end date, press Compute, and the map shows Sentinel-2 water, Sentinel-1 water, and the difference between those two dates.
 
-## Run locally
+## What the numbers mean
 
-```bash
-npm install
-npm run dev
-```
+Each chosen date is the last day of a 15-day composite. Red is erosion. Amber is deposition. The centreline is the middle of the optical water.
 
-Production validation:
+## Run on this computer
+
+Earth Engine is already signed in here. You do not sign in again for each date.
 
 ```bash
-npm run lint
-npm run build
-npm run preview
+python -m pip install -r backend/requirements.txt
+python -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8000
+cd frontend && npm install && npm run dev
 ```
 
-## Deploy to Vercel
+Open http://localhost:5173
 
-From the project root:
+A new date is downloaded once and saved under `data/live`. The same dates then open from disk. Those files are not part of the git repository.
+
+## Another computer
+
+Clone the repo, install the same requirements, then sign in to Earth Engine once:
 
 ```bash
-npm install
-npm run build
-npx vercel login
-npx vercel
-npx vercel --prod
+python -c "import ee; ee.Authenticate(auth_mode='localhost', scopes=['https://www.googleapis.com/auth/earthengine','https://www.googleapis.com/auth/cloud-platform'])"
 ```
 
-Accept Vercel's detected Vite settings. The production output directory is
-`dist`. The included `vercel.json` preserves SPA deep links and browser
-refreshes.
-
-## Prototype scope
-
-- OpenStreetMap and Esri imagery basemaps
-- Interactive Leaflet layers, search, popups, drawing, and area selection
-- Illustrative flood, landslide, terrain, rainfall, and exposure overlays
-- Simulated area analysis, historical charts, scenario analysis, and model explanation
-- API abstraction prepared for a future FastAPI GIS/ML service
-
-All hazard predictions, environmental metrics, historical records, and exposure
-figures are explicitly demo data. They are not operational forecasts or
-scientific outputs.
+The project used by this portal is `community-hero-5c501`. Set `GEE_PROJECT` if you use a different one. GitHub does not store the Google login.
