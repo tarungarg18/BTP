@@ -24,7 +24,7 @@ from rasterio.warp import Resampling, reproject
 
 from .catalog import OVERLAY_DIR, fmt_area
 from .gee_init import require_ee
-from .inspect import _axis_feature, _pixel_class, _pixel_rc, _ranked_patches, _zone
+from .inspect import _pixel_class, _pixel_rc, _ranked_patches, _zone
 from .watermask import (
     DEPOSITION_RGBA,
     EROSION_RGBA,
@@ -105,7 +105,7 @@ def _label(start: date, end_exclusive: date) -> str:
 
 
 def _cache_path(start: date, end_exclusive: date, sensor: str) -> Path:
-    return LIVE_DIR / f"gee4-{sensor}_{_key(start, end_exclusive)}.npz"
+    return LIVE_DIR / f"gee5-{sensor}_{_key(start, end_exclusive)}.npz"
 
 
 def _overlay_name(start: date, end_exclusive: date, kind: str, sensor: str = "optical") -> str:
@@ -291,32 +291,106 @@ def _download(ee, image, box: tuple[float, float, float, float]) -> bytes:
         raise RuntimeError(detail or "Earth Engine tile download failed") from exc
 
 
-def _clip_microwave(sar: np.ndarray, optical: np.ndarray, pixel_km2: float) -> np.ndarray:
+AXIS_STEP_M = 500.0
+AXIS_REACH_M = 15_000.0
+AXIS_SAMPLE_M = 100.0
+AXIS_SHIFT = 8
+BELT_HALF_M = 9_000.0
+
+
+def _river_axis(score: np.ndarray, grid: dict):
+    """One continuous Sadiya-to-Dhubri line through the strongest water.
+
+    Transects are cast every 500 m across the guide line. Each transect is scored by
+    the water density along it, and a dynamic-programming path picks one offset per
+    transect so the line follows the water without jumping more than 800 m between
+    neighbouring transects. Stretches with no detected water keep a straight course.
+    """
     from scipy import ndimage as ndi
+    from shapely.geometry import LineString
 
-    pixel_m = math.sqrt(pixel_km2 * 1_000_000.0)
-    near = ndi.distance_transform_edt(~optical) <= (800.0 / pixel_m)
-    return sar & near
+    from .crs import load_crs
+    from .guide import load_guide_lonlat
+
+    bundle = load_crs()
+    guide = np.asarray(load_guide_lonlat().coords)
+    gx, gy = bundle.to_metre.transform(guide[:, 0], guide[:, 1])
+    guide_m = LineString(zip(gx, gy))
+    stations = np.arange(0.0, guide_m.length, AXIS_STEP_M)
+    offsets = np.arange(-AXIS_REACH_M, AXIS_REACH_M + 1.0, AXIS_SAMPLE_M)
+    centre = np.array([guide_m.interpolate(d).coords[0] for d in stations])
+    ahead = np.array([guide_m.interpolate(min(d + 250.0, guide_m.length)).coords[0] for d in stations])
+    behind = np.array([guide_m.interpolate(max(d - 250.0, 0.0)).coords[0] for d in stations])
+    tangent = ahead - behind
+    tangent /= np.maximum(np.hypot(tangent[:, 0], tangent[:, 1]), 1e-9)[:, None]
+    normal = np.stack([-tangent[:, 1], tangent[:, 0]], axis=1)
+
+    xs = centre[:, 0][:, None] + normal[:, 0][:, None] * offsets[None, :]
+    ys = centre[:, 1][:, None] + normal[:, 1][:, None] * offsets[None, :]
+    lon, lat = bundle.to_lonlat.transform(xs.ravel(), ys.ravel())
+    bounds = grid["bounds"]
+    cols = np.floor((np.asarray(lon) - bounds["west"]) / ((bounds["east"] - bounds["west"]) / grid["width"])).astype(int)
+    rows = np.floor((bounds["north"] - np.asarray(lat)) / ((bounds["north"] - bounds["south"]) / grid["height"])).astype(int)
+    inside = (rows >= 0) & (rows < grid["height"]) & (cols >= 0) & (cols < grid["width"])
+    values = np.zeros(rows.size, dtype=np.float32)
+    values[inside] = score[rows[inside], cols[inside]]
+    density = ndi.uniform_filter1d(values.reshape(xs.shape), size=11, axis=1, mode="constant")
+    prior = 0.15 * np.abs(offsets) / AXIS_REACH_M
+    gain = density - prior[None, :]
+
+    count, width = gain.shape
+    total = gain[0].copy()
+    back = np.zeros((count, width), dtype=np.int16)
+    shifts = np.arange(-AXIS_SHIFT, AXIS_SHIFT + 1)
+    for index in range(1, count):
+        candidates = np.full((shifts.size, width), -np.inf, dtype=np.float64)
+        for slot, shift in enumerate(shifts):
+            moved = np.full(width, -np.inf)
+            if shift >= 0:
+                moved[shift:] = total[: width - shift] if shift else total
+            else:
+                moved[:shift] = total[-shift:]
+            candidates[slot] = moved - 0.01 * abs(int(shift))
+        best = np.argmax(candidates, axis=0)
+        total = candidates[best, np.arange(width)] + gain[index]
+        back[index] = shifts[best]
+    path = np.zeros(count, dtype=int)
+    path[-1] = int(np.argmax(total))
+    for index in range(count - 1, 0, -1):
+        path[index - 1] = path[index] - int(back[index, path[index]])
+    offset = offsets[np.clip(path, 0, width - 1)]
+    offset = ndi.median_filter(offset, size=5, mode="nearest")
+    offset = ndi.uniform_filter1d(offset, size=5, mode="nearest")
+
+    line_x = centre[:, 0] + normal[:, 0] * offset
+    line_y = centre[:, 1] + normal[:, 1] * offset
+    line_m = LineString(zip(line_x, line_y))
+    lon_line, lat_line = bundle.to_lonlat.transform(line_x, line_y)
+    coords = [[round(float(a), 5), round(float(b), 5)] for a, b in zip(lon_line, lat_line)]
+    feature = {
+        "type": "Feature",
+        "properties": {"role": "centreline"},
+        "geometry": {"type": "LineString", "coordinates": coords},
+    }
+    return feature, line_m, bundle
 
 
-def _river_core(water: np.ndarray, pixel_km2: float, height: int, width: int, transform) -> np.ndarray:
-    """Main channel and nearby braids, plus a disconnected upstream reach inside the corridor."""
-    from scipy import ndimage as ndi
+def _belt(line_m, bundle, shape: tuple[int, int]) -> np.ndarray:
+    from rasterio.features import rasterize
 
-    if not water.any():
-        return water
-    labels, count = ndi.label(water)
-    if count == 0:
-        return water
-    sizes = np.bincount(labels.ravel())
-    sizes[0] = 0
-    main = labels == int(sizes.argmax())
-    pixel_m = math.sqrt(pixel_km2 * 1_000_000.0)
-    near = ndi.distance_transform_edt(~main) <= (2_000.0 / pixel_m)
-    belt = _river_belt(height, width, transform, 12_000)
-    big = sizes >= max(1, int(round(5.0 / pixel_km2)))
-    big[0] = False
-    return (water & near) | (big[labels] & water & belt)
+    from .crs import to_lonlat
+
+    transform, _width, _height, _grid = _base_grid()
+    polygon = to_lonlat(line_m.buffer(BELT_HALF_M), bundle)
+    return rasterize([(polygon, 1)], out_shape=shape, transform=transform, fill=0, dtype="uint8").astype(bool)
+
+
+def _keep(mask: np.ndarray, pixel_km2: float, area_km2: float) -> np.ndarray:
+    from skimage.morphology import remove_small_objects
+
+    if not mask.any():
+        return mask
+    return remove_small_objects(mask, min_size=max(1, int(round(area_km2 / pixel_km2))))
 
 
 def _fetch(sensor: str, start: date, end_exclusive: date) -> tuple[np.ndarray, np.ndarray, dict, dict]:
@@ -346,15 +420,6 @@ def _fetch(sensor: str, start: date, end_exclusive: date) -> tuple[np.ndarray, n
         observed |= tile_observed
         _set_progress(detail=f"Cleaned tile {index} of {len(tiles)}")
         print(f"  {sensor} tile {index}/{len(tiles)} {start.isoformat()}", flush=True)
-    _set_progress(detail="Cleaning the river mask")
-    if sensor == "optical":
-        water = _river_core(water, grid["pixel_km2"], height, width, transform)
-    else:
-        min_pixels = max(1, int(round(0.5 / grid["pixel_km2"])))
-        if water.any():
-            from skimage.morphology import remove_small_objects
-
-            water = remove_small_objects(water, min_size=min_pixels)
     scale = SCALE_M
     meta = {
         "start": start.isoformat(),
@@ -366,7 +431,7 @@ def _fetch(sensor: str, start: date, end_exclusive: date) -> tuple[np.ndarray, n
         "scale_m": scale,
         "project": PROJECT,
         "method": method,
-        "cleaned": True,
+        "cleaned": False,
         "water_km2": round(float(water.sum()) * grid["pixel_km2"], 2),
         "bounds": grid["bounds"],
         "source": "Google Earth Engine",
@@ -391,10 +456,6 @@ def _cached(start: date, end_exclusive: date, sensor: str) -> dict | None:
         return None
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
     water, observed, grid = _load(path)
-    png = OVERLAY_DIR / _overlay_name(start, end_exclusive, "river", sensor)
-    if not png.exists():
-        color = (124, 58, 237, 185) if sensor == "microwave" else RIVER_RGBA
-        write_mask_png(water, color, png)
     return {"water": water, "observed": observed, "grid": grid, "meta": meta}
 
 
@@ -441,9 +502,6 @@ def extract_window(start: date, end_exclusive: date, sensor: str = "optical", st
             bounds=np.array([grid["bounds"]["west"], grid["bounds"]["south"], grid["bounds"]["east"], grid["bounds"]["north"]]),
         )
         meta_path.write_text(json.dumps(meta), encoding="utf-8")
-        png = OVERLAY_DIR / _overlay_name(start, end_exclusive, "river", sensor)
-        color = (124, 58, 237, 185) if sensor == "microwave" else RIVER_RGBA
-        write_mask_png(water, color, png)
         _write_tif(path.with_suffix(".tif"), water, observed, grid)
         return {"water": water, "observed": observed, "grid": grid, "meta": meta}
     except Exception as exc:
@@ -492,41 +550,108 @@ def _write_tif(path: Path, water: np.ndarray, observed: np.ndarray, grid: dict) 
         dst.write(band, 1)
 
 
-def compare_dates(end_text: str, start_text: str | None) -> dict:
+_PAIR_CACHE: dict[str, dict] = {}
+OPTICAL_RGBA = RIVER_RGBA
+MICROWAVE_RGBA = (124, 58, 237, 185)
+
+
+def _fused(optical: dict, sar: dict, belt: np.ndarray, pixel_km2: float) -> tuple[np.ndarray, np.ndarray]:
+    """River water on one date: Sentinel-2 or Sentinel-1 water inside the river belt."""
+    water = (optical["water"] | sar["water"]) & belt
+    water = _keep(water, pixel_km2, 0.2)
+    observed = (optical["observed"] | sar["observed"]) & belt
+    return water, observed
+
+
+def _pair(end_text: str, start_text: str | None, staged: bool = False) -> dict:
     earlier_window, later_window = resolve_windows(end_text, start_text or None)
-    earlier = extract_window(*earlier_window, "optical", "Base optical")
-    later = extract_window(*later_window, "optical", "Current optical")
-    microwave = extract_window(*later_window, "microwave", "Microwave")
-    _set_progress(step="Difference", detail="Erosion is new water. Deposition is water that left.")
+    cache_key = f"{_key(*later_window)}__{_key(*earlier_window)}"
+    if cache_key in _PAIR_CACHE:
+        return _PAIR_CACHE[cache_key]
+    earlier = extract_window(*earlier_window, "optical", "Base optical" if staged else "")
+    earlier_sar = extract_window(*earlier_window, "microwave", "Base microwave" if staged else "")
+    later = extract_window(*later_window, "optical", "Current optical" if staged else "")
+    later_sar = extract_window(*later_window, "microwave", "Current microwave" if staged else "")
+    if staged:
+        _set_progress(step="Difference", detail="Drawing the centreline and comparing the two dates")
     grid = later["grid"]
-    microwave_water = _clip_microwave(microwave["water"], later["water"], grid["pixel_km2"])
-    write_mask_png(microwave_water, (124, 58, 237, 185), OVERLAY_DIR / _overlay_name(*later_window, "river", "microwave"))
-    min_pixels = max(1, int(round(0.01 / grid["pixel_km2"])))
-    erosion, deposition, persistent = change_masks(
-        earlier["water"],
-        later["water"],
-        earlier["observed"],
-        later["observed"],
-        min_pixels,
-    )
     pixel_km2 = grid["pixel_km2"]
-    erosion_km2 = round(float(erosion.sum()) * pixel_km2, 2)
-    deposition_km2 = round(float(deposition.sum()) * pixel_km2, 2)
-    persistent_km2 = round(float(persistent.sum()) * pixel_km2, 2)
+
+    score = later["water"].astype(np.float32) + 0.6 * later_sar["water"].astype(np.float32)
+    axis, line_m, bundle = _river_axis(score, grid)
+    belt = _belt(line_m, bundle, later["water"].shape)
+
+    earlier_water, earlier_observed = _fused(earlier, earlier_sar, belt, pixel_km2)
+    later_water, later_observed = _fused(later, later_sar, belt, pixel_km2)
+    optical_water = _keep(later["water"] & belt, pixel_km2, 0.2)
+    sar_water = _keep(later_sar["water"] & belt, pixel_km2, 0.2)
+
+    erosion, deposition, persistent = change_masks(
+        earlier_water,
+        later_water,
+        earlier_observed,
+        later_observed,
+        max(1, int(round(0.05 / pixel_km2))),
+    )
+    result = {
+        "earlier_window": earlier_window,
+        "later_window": later_window,
+        "earlier": earlier,
+        "later": later,
+        "later_sar": later_sar,
+        "grid": grid,
+        "axis": axis,
+        "belt": belt,
+        "earlier_water": earlier_water,
+        "earlier_observed": earlier_observed,
+        "later_water": later_water,
+        "later_observed": later_observed,
+        "optical_water": optical_water,
+        "sar_water": sar_water,
+        "erosion": erosion,
+        "deposition": deposition,
+        "persistent": persistent,
+        "key": cache_key,
+    }
+    if len(_PAIR_CACHE) >= 3:
+        _PAIR_CACHE.pop(next(iter(_PAIR_CACHE)))
+    _PAIR_CACHE[cache_key] = result
+    return result
+
+
+def compare_dates(end_text: str, start_text: str | None) -> dict:
+    pair = _pair(end_text, start_text, staged=True)
+    grid = pair["grid"]
+    pixel_km2 = grid["pixel_km2"]
+    later_window = pair["later_window"]
+    earlier = pair["earlier"]
+    later = pair["later"]
+
+    def area(mask: np.ndarray) -> float:
+        return round(float(mask.sum()) * pixel_km2, 2)
+
+    erosion_km2 = area(pair["erosion"])
+    deposition_km2 = area(pair["deposition"])
+    persistent_km2 = area(pair["persistent"])
     net = round(erosion_km2 - deposition_km2, 2)
-    later_id = parse_day(end_text).isoformat()
-    earlier_id = parse_day(start_text).isoformat() if start_text else ""
-    pair = f"{_key(*later_window)}__{_key(*earlier_window)}"
-    erosion_name = f"{pair}-erosion.png"
-    deposition_name = f"{pair}-deposition.png"
-    write_mask_png(erosion, EROSION_RGBA, OVERLAY_DIR / erosion_name)
-    write_mask_png(deposition, DEPOSITION_RGBA, OVERLAY_DIR / deposition_name)
-    axis = _axis_feature(later["water"], grid, later_id)
-    note = ""
+    optical_km2 = area(pair["optical_water"])
+    sar_km2 = area(pair["sar_water"])
+
+    key = pair["key"]
+    optical_name = f"{key}-optical.png"
+    sar_name = f"{key}-microwave.png"
+    erosion_name = f"{key}-erosion.png"
+    deposition_name = f"{key}-deposition.png"
+    write_mask_png(pair["optical_water"], OPTICAL_RGBA, OVERLAY_DIR / optical_name)
+    write_mask_png(pair["sar_water"], MICROWAVE_RGBA, OVERLAY_DIR / sar_name)
+    write_mask_png(pair["erosion"], EROSION_RGBA, OVERLAY_DIR / erosion_name)
+    write_mask_png(pair["deposition"], DEPOSITION_RGBA, OVERLAY_DIR / deposition_name)
+    write_mask_png(pair["later_water"], OPTICAL_RGBA, OVERLAY_DIR / _overlay_name(*later_window, "river"))
+
     return {
         "available": True,
-        "earlier_id": earlier_id,
-        "later_id": later_id,
+        "earlier_id": parse_day(start_text).isoformat() if start_text else "",
+        "later_id": parse_day(end_text).isoformat(),
         "earlier_label": earlier["meta"]["label"],
         "later_label": later["meta"]["label"],
         "earlier_short": earlier["meta"]["label"],
@@ -539,24 +664,24 @@ def compare_dates(end_text: str, start_text: str | None) -> dict:
         "persistent_display": fmt_area(persistent_km2),
         "net_water_change_km2": net,
         "net_water_change_display": f"{net:+.0f} km²" if abs(net) >= 100 else f"{net:+.1f} km²",
-        "earlier_water_km2": earlier["meta"]["water_km2"],
-        "later_water_km2": later["meta"]["water_km2"],
-        "later_water_display": fmt_area(later["meta"]["water_km2"]),
-        "microwave_water_km2": round(float(microwave_water.sum()) * pixel_km2, 2),
-        "microwave_water_display": fmt_area(round(float(microwave_water.sum()) * pixel_km2, 2)),
-        "microwave_png": f"/api/overlays/{_overlay_name(*later_window, 'river', 'microwave')}",
+        "earlier_water_km2": area(pair["earlier_water"]),
+        "later_water_km2": area(pair["later_water"]),
+        "later_water_display": fmt_area(optical_km2),
+        "microwave_water_km2": sar_km2,
+        "microwave_water_display": fmt_area(sar_km2),
+        "microwave_png": f"/api/overlays/{sar_name}",
         "optical_scene": later["meta"].get("latest_scene"),
-        "microwave_scene": microwave["meta"].get("latest_scene"),
+        "microwave_scene": pair["later_sar"]["meta"].get("latest_scene"),
         "unit": "km²",
         "validation_status": "ready",
         "disclaimer": "",
         "erosion_png": f"/api/overlays/{erosion_name}",
         "deposition_png": f"/api/overlays/{deposition_name}",
-        "river_png": f"/api/overlays/{_overlay_name(*later_window, 'river')}",
+        "river_png": f"/api/overlays/{optical_name}",
         "bounds": grid["bounds"],
-        "note": note,
+        "note": "",
         "rows": [],
-        "centerline": axis if axis.get("geometry") else None,
+        "centerline": pair["axis"],
         "scene_count": later["meta"]["scene_count"],
         "scale_m": SCALE_M,
         "source": "Google Earth Engine",
@@ -564,20 +689,10 @@ def compare_dates(end_text: str, start_text: str | None) -> dict:
 
 
 def period_points(end_text: str, start_text: str | None) -> dict:
-    earlier_window, later_window = resolve_windows(end_text, start_text or None)
-    earlier = extract_window(*earlier_window, "optical")
-    later = extract_window(*later_window, "optical")
-    grid = later["grid"]
-    min_pixels = max(1, int(round(0.01 / grid["pixel_km2"])))
-    erosion, deposition, _persistent = change_masks(
-        earlier["water"],
-        later["water"],
-        earlier["observed"],
-        later["observed"],
-        min_pixels,
-    )
-    erosion_rows, erosion_count = _ranked_patches(erosion, grid)
-    deposition_rows, deposition_count = _ranked_patches(deposition, grid)
+    pair = _pair(end_text, start_text)
+    grid = pair["grid"]
+    erosion_rows, erosion_count = _ranked_patches(pair["erosion"], grid)
+    deposition_rows, deposition_count = _ranked_patches(pair["deposition"], grid)
     return {
         "later_id": parse_day(end_text).isoformat(),
         "earlier_id": parse_day(start_text).isoformat() if start_text else "",
@@ -590,38 +705,43 @@ def period_points(end_text: str, start_text: str | None) -> dict:
 
 
 def period_identify(lon: float, lat: float, end_text: str, start_text: str | None) -> dict:
-    earlier_window, later_window = resolve_windows(end_text, start_text or None)
-    earlier = extract_window(*earlier_window, "optical")
-    later = extract_window(*later_window, "optical")
-    grid = later["grid"]
-    earlier_label = earlier["meta"]["label"]
-    later_label = later["meta"]["label"]
+    pair = _pair(end_text, start_text)
+    grid = pair["grid"]
+    earlier_label = pair["earlier"]["meta"]["label"]
+    later_label = pair["later"]["meta"]["label"]
     row_f, col_f = _pixel_rc(lon, lat, grid)
     row, col = int(np.floor(row_f)), int(np.floor(col_f))
-    name = _pixel_class(row, col, earlier["water"], earlier["observed"], later["water"], later["observed"])
+    inside = 0 <= row < grid["height"] and 0 <= col < grid["width"]
+    if not inside:
+        name = "outside"
+    elif not pair["belt"][row, col]:
+        name = "land"
+    else:
+        name = _pixel_class(
+            row,
+            col,
+            pair["earlier_water"],
+            pair["earlier_observed"],
+            pair["later_water"],
+            pair["later_observed"],
+        )
+        if name == "corridor_expansion" and not pair["erosion"][row, col]:
+            name = "persistent_water"
+        if name == "corridor_contraction" and not pair["deposition"][row, col]:
+            name = "land"
     labels = {
         "corridor_expansion": "Erosion",
         "corridor_contraction": "Deposition",
         "persistent_water": "Water in both periods",
         "land": "Land in both periods",
-        "nodata": "No clear Sentinel-2 observation",
-        "outside": "Outside the extract",
+        "nodata": "No observation",
+        "outside": "Outside the map",
     }
     zone = None
     if name == "corridor_expansion":
-        min_pixels = max(1, int(round(0.01 / grid["pixel_km2"])))
-        erosion, _deposition, _persistent = change_masks(
-            earlier["water"], later["water"], earlier["observed"], later["observed"], min_pixels,
-        )
-        if 0 <= row < erosion.shape[0] and 0 <= col < erosion.shape[1] and erosion[row, col]:
-            zone = _zone(erosion, row, col, grid, name, earlier_label, later_label)
+        zone = _zone(pair["erosion"], row, col, grid, name, earlier_label, later_label)
     elif name == "corridor_contraction":
-        min_pixels = max(1, int(round(0.01 / grid["pixel_km2"])))
-        _erosion, deposition, _persistent = change_masks(
-            earlier["water"], later["water"], earlier["observed"], later["observed"], min_pixels,
-        )
-        if 0 <= row < deposition.shape[0] and 0 <= col < deposition.shape[1] and deposition[row, col]:
-            zone = _zone(deposition, row, col, grid, name, earlier_label, later_label)
+        zone = _zone(pair["deposition"], row, col, grid, name, earlier_label, later_label)
     return {
         "longitude": lon,
         "latitude": lat,
@@ -638,7 +758,7 @@ def list_periods() -> list[dict]:
     if not LIVE_DIR.exists():
         return []
     rows = []
-    for path in sorted(LIVE_DIR.glob("gee4-*.json")):
+    for path in sorted(LIVE_DIR.glob("gee5-*.json")):
         meta = json.loads(path.read_text(encoding="utf-8"))
         key = path.stem
         tif = LIVE_DIR / f"{key}.tif"

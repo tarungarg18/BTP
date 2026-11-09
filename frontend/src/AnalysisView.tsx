@@ -63,10 +63,11 @@ function PointTable({ title, tone, rows, total, selectedLat, onSelect }: PointTa
 const ROI: Bounds = { west: 89.5, south: 25.5, east: 96, north: 28.5 }
 
 const STEPS: { id: string; label: string }[] = [
-  { id: 'Base optical', label: 'Fetch and clean the base optical mask' },
-  { id: 'Current optical', label: 'Fetch and clean the current optical mask' },
-  { id: 'Microwave', label: 'Fetch and clean the microwave mask' },
-  { id: 'Difference', label: 'Compare base water with current water' },
+  { id: 'Base optical', label: 'Fetch the start-date optical mask' },
+  { id: 'Base microwave', label: 'Fetch the start-date microwave mask' },
+  { id: 'Current optical', label: 'Fetch the end-date optical mask' },
+  { id: 'Current microwave', label: 'Fetch the end-date microwave mask' },
+  { id: 'Difference', label: 'Draw the centreline and compare the two dates' },
   { id: 'Points', label: 'Rank erosion and deposition points' },
 ]
 
