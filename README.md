@@ -1,14 +1,21 @@
 # Brahmaputra Bank Change Portal
 
-Assam main stem, Sadiya to Dhubri. Choose a start date and an end date, press Compute, and the map shows Sentinel-2 water, Sentinel-1 water, and the difference between those two dates.
+Assam main stem, Sadiya to Dhubri. Compare two Sentinel-2 or Sentinel-1 observations and map corridor expansion and contraction candidates.
 
-## What the numbers mean
+## What it does
 
-Each chosen date is the last day of a 15-day composite. Red is erosion. Amber is deposition. The centreline is the middle of the optical water.
+Mode A compares two dates. Each date is the end of a 1, 15, 30, or 60 day composite. The gap between the dates is not filled in.
 
-## Run on this computer
+Mode B compares two explicit periods. The later period must start after the earlier period ends.
 
-Earth Engine is already signed in here. You do not sign in again for each date.
+Water baselines, recorded with every run and not treated as universal rules:
+
+- Sentinel-2: MNDWI (B3, B11) greater than 0, after SCL masking
+- Sentinel-1: VV less than -16 dB
+
+The comparison uses a fixed 100 m Assam Albers grid. Areas are corridor expansion and contraction candidates on pixels observed in both dates. Unobserved pixels are not treated as land. River stage and season can produce a similar pattern.
+
+## Run locally
 
 ```bash
 python -m pip install -r backend/requirements.txt
@@ -18,14 +25,12 @@ cd frontend && npm install && npm run dev
 
 Open http://localhost:5173
 
-A new date is downloaded once and saved under `data/live`. The same dates then open from disk. Those files are not part of the git repository.
+Downloads are cached under `data/live` and are not committed.
 
 ## Another computer
-
-Clone the repo, install the same requirements, then sign in to Earth Engine once:
 
 ```bash
 python -c "import ee; ee.Authenticate(auth_mode='localhost', scopes=['https://www.googleapis.com/auth/earthengine','https://www.googleapis.com/auth/cloud-platform'])"
 ```
 
-The project used by this portal is `community-hero-5c501`. Set `GEE_PROJECT` if you use a different one. GitHub does not store the Google login.
+The Earth Engine project is `community-hero-5c501`. Override it with `GEE_PROJECT`. Do not commit Google credentials.

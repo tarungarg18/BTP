@@ -3,6 +3,7 @@ frontend/dist
 frontend/tsconfig.tsbuildinfo
 __pycache__/
 *.pyc
+.pytest_cache/
 data/store.json
 data/rasters/
 data/mask_catalog.json
@@ -16,4 +17,15 @@ data/live/
 extra/
 drive-download-*/
 *.tif
+*.npz
 .venv
+.env
+**/credentials*.json
+**/ee-*.json
+*.docx
+*.ipynb
+reports/qc/*.tif
+reports/qc/*.png
+reports/qc/*.npz
+reports/qc/*.geojson
+reports/qc/*.csv

@@ -111,6 +111,8 @@ export interface ChangeStats {
     last_both_ok_chainage_m?: number | null
     note?: string
   } | null
+  overlap_days?: number
+  banks_validated?: boolean
   partial_coverage?: boolean
   requires_ack?: boolean
   coverage_warning?: string | null

@@ -31,8 +31,8 @@ CLASSIFICATION_NOTE = (
     "adaptive/Otsu thresholds are not used unless explicitly recorded."
 )
 MASKING = {
-    "optical": "SCL_clear_3_8_9_10_11",
-    "microwave": "none",
+    "optical": "SCL_exclude_0_1_3_8_9_10_11",
+    "microwave": "IW_VV_mixed_orbits_recorded",
 }
 
 
@@ -68,6 +68,7 @@ class CompareRequest:
     earlier: ObservationWindow
     later: ObservationWindow
     acknowledge_partial: bool = False
+    overlap_days: int = 0
 
     def cache_key(self, *, close_m: float, scale_m: float, crs: str) -> str:
         return (
@@ -90,6 +91,15 @@ class CompareRequest:
             "sensor": self.sensor,
             "window_days": self.window_days,
             "acknowledge_partial": self.acknowledge_partial,
+            "overlap_days": self.overlap_days,
+            "overlap_note": (
+                None
+                if self.overlap_days <= 0
+                else (
+                    f"The two composites share {self.overlap_days} day(s). "
+                    "They are not independent observations."
+                )
+            ),
             "earlier": {
                 "start": self.earlier.start.isoformat(),
                 "end": self.earlier.end.isoformat(),
@@ -191,6 +201,9 @@ def build_compare_request(
 
     validate_against_archive(earlier_window, sensor)
     validate_against_archive(later_window, sensor)
+    shared_start = max(earlier_window.start, later_window.start)
+    shared_end = min(earlier_window.end, later_window.end)
+    shared = (shared_end - shared_start).days + 1 if shared_end >= shared_start else 0
     return CompareRequest(
         mode=mode,
         sensor=sensor,
@@ -198,6 +211,7 @@ def build_compare_request(
         earlier=earlier_window,
         later=later_window,
         acknowledge_partial=bool(acknowledge_partial),
+        overlap_days=int(shared),
     )
 
 

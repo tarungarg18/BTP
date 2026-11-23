@@ -58,6 +58,18 @@ def test_optical_archive_floor():
         assert "2017-03-28" in str(exc)
 
 
+def test_mode_a_reports_overlapping_windows():
+    req = build_compare_request(mode="dates", earlier="2026-04-08", later="2026-04-22", window_days=15)
+    assert req.overlap_days == 1
+    assert req.as_dict()["overlap_note"]
+
+
+def test_mode_a_no_overlap_when_windows_are_apart():
+    req = build_compare_request(mode="dates", earlier="2020-04-15", later="2021-04-15", window_days=15)
+    assert req.overlap_days == 0
+    assert req.as_dict()["overlap_note"] is None
+
+
 def test_cache_key_deterministic_and_complete():
     req = build_compare_request(mode="dates", earlier="2020-04-08", later="2020-04-22", sensor="microwave", window_days=30)
     key = req.cache_key(close_m=300, scale_m=100, crs=ANALYSIS_CRS)

@@ -49,16 +49,21 @@ a { color: var(--blue); }
 
 .work { flex: 1; min-height: 0; display: grid; grid-template-columns: 380px minmax(0, 1fr); }
 .rail {
-  min-height: 0; overflow: auto; padding: 14px; border-right: 1px solid var(--line);
+  min-width: 0; min-height: 0; overflow-x: hidden; overflow-y: auto;
+  padding: 14px; border-right: 1px solid var(--line);
   display: grid; align-content: start; gap: 12px; background: #ffffff;
 }
+.rail > * { min-width: 0; max-width: 100%; }
 .rail h2 { margin: 0; font-size: 16px; }
-.dates { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-.field { display: grid; gap: 4px; font-size: 11px; color: var(--muted); letter-spacing: 0.04em; text-transform: uppercase; }
+.dates { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px; min-width: 0; }
+.field { display: grid; gap: 4px; min-width: 0; font-size: 11px; color: var(--muted); letter-spacing: 0.04em; text-transform: uppercase; }
+.field-span { grid-column: 1 / -1; }
 .field select, .field input {
+  width: 100%; min-width: 0; max-width: 100%;
   height: 36px; border: 1px solid var(--line); border-radius: 8px; background: #fff; padding: 0 8px;
   color: #172033; text-transform: none; letter-spacing: 0; font-size: 13px;
 }
+.note, .check, .steps li span { overflow-wrap: anywhere; }
 .figures { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .figure { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
 .figure b { display: block; font-size: 20px; font-weight: 650; }
@@ -66,8 +71,8 @@ a { color: var(--blue); }
 .tone-erosion { color: var(--erosion); }
 .tone-deposition { color: var(--deposition); }
 .note { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.4; }
-.checks { display: flex; flex-wrap: wrap; gap: 8px 12px; }
-.check { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+.checks { display: flex; flex-wrap: wrap; gap: 8px 12px; min-width: 0; }
+.check { display: flex; align-items: center; gap: 6px; font-size: 12px; min-width: 0; }
 .readout { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; font-size: 13px; }
 .readout p { margin: 4px 0 0; }
 .readout strong { font-variant-numeric: tabular-nums; }

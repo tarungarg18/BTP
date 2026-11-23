@@ -294,27 +294,42 @@ def points(later: str, earlier: str = "") -> dict:
 
 
 @app.get("/api/identify")
-def identify(lon: float, lat: float, later: str, earlier: str | None = None) -> dict:
-    if _is_day(later):
-        from processing.gee_init import GeeUnavailable
-        from processing.live_extract import period_identify
-
-        try:
-            return period_identify(lon, lat, later, earlier if _is_day(earlier) else None)
-        except GeeUnavailable as exc:
-            raise HTTPException(503, str(exc)) from exc
-        except ValueError as exc:
-            raise HTTPException(400, str(exc)) from exc
-        except RuntimeError as exc:
-            raise HTTPException(404, str(exc)) from exc
-    from processing.inspect import identify as locate
+def identify(
+    lon: float,
+    lat: float,
+    later: str = "",
+    earlier: str | None = None,
+    sensor: str = "optical",
+    mode: str = "dates",
+    window_days: int = 15,
+    earlier_start: str = "",
+    earlier_end: str = "",
+    later_start: str = "",
+    later_end: str = "",
+) -> dict:
+    from processing.date_options import build_compare_request
+    from processing.gee_init import GeeUnavailable
+    from processing.live_extract import period_identify
 
     try:
-        return locate(lon, lat, later, earlier)
-    except FileNotFoundError as exc:
+        request = build_compare_request(
+            mode=mode,
+            sensor=sensor,
+            window_days=window_days,
+            later=later or None,
+            earlier=earlier or None,
+            earlier_start=earlier_start or None,
+            earlier_end=earlier_end or None,
+            later_start=later_start or None,
+            later_end=later_end or None,
+        )
+        return period_identify(lon, lat, request=request)
+    except GeeUnavailable as exc:
+        raise HTTPException(503, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except RuntimeError as exc:
         raise HTTPException(404, str(exc)) from exc
-    except KeyError as exc:
-        raise HTTPException(404, "Unknown observation") from exc
 
 
 @app.get("/api/profile")

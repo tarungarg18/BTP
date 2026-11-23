@@ -144,7 +144,7 @@ def test_braided_islands_stay_inside_envelope():
     env = build_outer_river_envelope(water, corridor, pixel_m=100.0, close_m=400.0, guide_mask=guide)
     assert env[40, 100]
     poly = extract_outer_ring(env, transform)
-    assert poly.interiors == () or all(True for _ in [])
+    assert len(poly.interiors) == 0
 
 
 def test_isolated_lake_excluded():

@@ -95,7 +95,6 @@ export default function AnalysisView({ summary }: AnalysisViewProps): React.JSX.
   const [laterEnd, setLaterEnd] = useState('')
   const [ackPartial, setAckPartial] = useState(false)
   const [ackFingerprint, setAckFingerprint] = useState<string | null>(null)
-  const [preflightNote, setPreflightNote] = useState<string | null>(null)
   const [change, setChange] = useState<ChangeStats | null>(null)
   const [points, setPoints] = useState<ChangePoints | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -142,7 +141,6 @@ export default function AnalysisView({ summary }: AnalysisViewProps): React.JSX.
     setPick(null)
     setFocus(null)
     setError(null)
-    setPreflightNote(null)
     setAckPartial(false)
     setAckFingerprint(null)
     setResultFingerprint(null)
@@ -258,10 +256,6 @@ export default function AnalysisView({ summary }: AnalysisViewProps): React.JSX.
         return
       }
       if (activeComputeGen.current !== gen) return
-      setPreflightNote(
-        `${flight.sensor}: earlier ${flight.earlier.scene_count} scenes (${flight.earlier.earliest_acquisition}→${flight.earlier.latest_acquisition}); `
-        + `later ${flight.later.scene_count} scenes (${flight.later.earliest_acquisition}→${flight.later.latest_acquisition}).`,
-      )
       setDetail('Starting downloads')
       return api.compute(params)
     }).catch((err: unknown) => {
@@ -284,7 +278,7 @@ export default function AnalysisView({ summary }: AnalysisViewProps): React.JSX.
     locateToken.current = token
     const gen = requestGen.current
     const fp = resultFingerprintRef.current
-    void api.identify(lon, lat, change.later_id ?? '', change.earlier_id ?? '').then((result) => {
+    void api.identify(lon, lat, requestParams()).then((result) => {
       if (locateToken.current !== token) return
       if (requestGen.current !== gen) return
       if (fp != null && resultFingerprintRef.current !== fp) return
@@ -340,7 +334,7 @@ export default function AnalysisView({ summary }: AnalysisViewProps): React.JSX.
                 Earlier date
                 <input type="date" value={startId} max={endId || undefined} onChange={(event) => setStartId(event.target.value)} />
               </label>
-              <label className="field">
+              <label className="field field-span">
                 Later date
                 <input type="date" value={endId} onChange={(event) => setEndId(event.target.value)} />
               </label>
@@ -354,11 +348,6 @@ export default function AnalysisView({ summary }: AnalysisViewProps): React.JSX.
             </>
           )}
         </div>
-        <p className="note">
-          {mode === 'dates'
-            ? `Mode A: each date ends a ${windowDays}-day composite. This is not the full interval between the two dates.`
-            : 'Mode B: each period is composited independently. The gap between periods is not filled.'}
-        </p>
         <label className="check">
           <input
             type="checkbox"
@@ -369,7 +358,7 @@ export default function AnalysisView({ summary }: AnalysisViewProps): React.JSX.
               setAckFingerprint(checked ? requestFingerprint() : null)
             }}
           />
-          Acknowledge partial corridor coverage (&lt;70% valid)
+          Show partial coverage
         </label>
         <button type="button" className="compute" disabled={running || (mode === 'dates' ? !endId : false)} onClick={compute}>
           {running && <Loader2 className="spin" size={16} />}
@@ -392,35 +381,9 @@ export default function AnalysisView({ summary }: AnalysisViewProps): React.JSX.
           <div className="figure"><b>{change?.valid_fraction != null ? `${(100 * change.valid_fraction).toFixed(0)}%` : '—'}</b><span>Valid overlap</span></div>
         </div>
         {error && <p className="note">{error}</p>}
-        {preflightNote && <p className="note">{preflightNote}</p>}
-        {!change && !running && <p className="note">Earlier and later outer banklines are compared on common valid observations only.</p>}
-        {change?.earlier_label && change.later_label && (
-          <p className="note">Earlier {change.earlier_label} · Later {change.later_label}. Net corridor change {netText}.</p>
-        )}
-        {change?.acquisition && (
-          <p className="note">
-            Scenes: earlier {change.acquisition.earlier?.scene_count ?? '—'} ({change.acquisition.earlier?.latest_scene ?? '—'}) ·
-            later {change.acquisition.later?.scene_count ?? '—'} ({change.acquisition.later?.latest_scene ?? '—'})
-          </p>
-        )}
-        {change?.partial_coverage && (
-          <p className="note">
-            Partial coverage warning: valid overlap {(100 * (change.valid_fraction ?? 0)).toFixed(1)}%
-            {' '}(threshold {100 * (change.min_valid_fraction ?? 0.7)}%).
-            {' '}{change.coverage_warning || 'Do not claim full Brahmaputra coverage.'}
-            {!ackApplies ? ' Tick the acknowledge box above if you accept a partial-corridor result.' : ' Acknowledged.'}
-          </p>
-        )}
-        {change?.transect_qc && (
-          <p className="note">
-            Transects both_ok {change.transect_qc.both_ok}/{change.transect_qc.total_transects}
-            {' '}({change.transect_qc.pct_of_mutual_span}% inside mutual span
-            {' '}{change.transect_qc.first_both_ok_chainage_m}–{change.transect_qc.last_both_ok_chainage_m} m).
-            {' '}Not full-guide accuracy.
-          </p>
-        )}
-        {change?.note && <p className="note">{change.note}</p>}
-        {change?.disclaimer && <p className="note">{change.disclaimer}</p>}
+        {change?.overlap_days ? <p className="note">Windows overlap {change.overlap_days} days.</p> : null}
+        {change?.partial_coverage && !ackApplies && <p className="note">Partial coverage. Tick the box to show areas.</p>}
+        {change && change.banks_validated === false && <p className="note">Bankline check failed.</p>}
         <div className="checks">
           <label className="check"><input type="checkbox" checked={showRiver} onChange={() => setShowRiver((value) => !value)} /> Optical water</label>
           <label className="check"><input type="checkbox" checked={showMicrowave} onChange={() => setShowMicrowave((value) => !value)} /> Microwave water</label>
@@ -434,8 +397,7 @@ export default function AnalysisView({ summary }: AnalysisViewProps): React.JSX.
         </div>
         <div className="readout">
           {pick && <strong>{pick.lat.toFixed(5)}, {pick.lon.toFixed(5)}</strong>}
-          {!change && <p className="note">Compute a pair, then click the map for that point.</p>}
-          {change && !hit && <p className="note">Click the map. The class is for the computed base and current dates.</p>}
+          {change && !hit && pick && <p className="note">—</p>}
           {hit && (
             <>
               <strong>{hit.latitude.toFixed(5)}, {hit.longitude.toFixed(5)}</strong>

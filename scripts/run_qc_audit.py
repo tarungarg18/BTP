@@ -15,7 +15,9 @@ import numpy as np
 import rasterio
 from PIL import Image
 from rasterio.transform import array_bounds
-from shapely.geometry import mapping, shape
+from shapely.geometry import LineString, mapping, shape
+
+from processing.crs import ANALYSIS_CRS, ANALYSIS_CRS_WKT, load_crs
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -33,7 +35,7 @@ def _write_mask_tif(path: Path, mask: np.ndarray, transform, nodata: int = 0) ->
         width=mask.shape[1],
         count=1,
         dtype="uint8",
-        crs="EPSG:4326",
+        crs=ANALYSIS_CRS_WKT,
         transform=transform,
         compress="lzw",
     ) as ds:
@@ -53,12 +55,12 @@ def _bank_report(feat: dict, guide_m, bundle) -> dict:
 
     geom = shape(feat["geometry"])
     line_m = to_metres(geom, bundle)
+    if not isinstance(line_m, LineString):
+        line_m = LineString(list(line_m.coords))
     coords = list(geom.coords)
-    gaps = []
-    for i in range(1, len(coords)):
-        gaps.append(math.hypot(coords[i][0] - coords[i - 1][0], coords[i][1] - coords[i - 1][1]) * 111_000)
+    metric = list(line_m.coords)
+    gaps = [math.hypot(metric[i][0] - metric[i - 1][0], metric[i][1] - metric[i - 1][1]) for i in range(1, len(metric))]
     # side fraction in projected space
-    line_m = LineString(list(line_m.coords)) if not isinstance(line_m, LineString) else line_m
     pos = 0
     n = 0
     for i in range(0, len(line_m.coords), max(1, len(line_m.coords) // 40)):
@@ -108,11 +110,13 @@ def _transect_rgb(rows, transform, shape_hw) -> np.ndarray:
         "neither": (120, 40, 40),
         "missing_intersection": (120, 40, 40),
     }
-    a, e = float(transform.a), float(abs(transform.e))
-    c, f = float(transform.c), float(transform.f)
+    bundle = load_crs()
+    from rasterio.transform import rowcol
+
     for row in rows:
-        col = int((row["longitude"] - c) / a)
-        r = int((f - row["latitude"]) / e)
+        x, y = bundle.to_metre.transform(row["longitude"], row["latitude"])
+        r, col = rowcol(transform, x, y)
+        r, col = int(r), int(col)
         if 0 <= r < h and 0 <= col < w:
             color = colors.get(row["qc_status"], (80, 80, 80))
             rgb[max(0, r - 2) : r + 3, max(0, col - 2) : col + 3] = color
@@ -132,11 +136,13 @@ def _bankline_diagnostic_png(pair, transform, path: Path) -> None:
         canvas[mask] = color
     img = Image.fromarray(canvas, mode="RGB")
     draw = ImageDraw.Draw(img)
-    a, e = float(transform.a), float(abs(transform.e))
-    c, f = float(transform.c), float(transform.f)
+    bundle = load_crs()
+    from rasterio.transform import rowcol
 
     def to_px(lon, lat):
-        return ((lon - c) / a / stride, (f - lat) / e / stride)
+        x, y = bundle.to_metre.transform(lon, lat)
+        r, c = rowcol(transform, x, y)
+        return (c / stride, r / stride)
 
     for feat in pair["banks"]:
         role = feat["properties"]["role"]
@@ -207,7 +213,7 @@ def run(later="2026-04-22", earlier="2026-04-08") -> dict:
     ew, lw = resolve_windows(later, earlier)
     later_win = extract_window(*lw, "optical")
     gmask = guide_search_mask(height, width, transform, 8_000.0)
-    pixel_m = abs(float(transform.a)) * 111_320.0 * math.cos(math.radians(27.0))
+    pixel_m = abs(float(transform.a))
     sensitivity = {}
     for close_m in (100, 200, 300, 500):
         env = build_outer_river_envelope(
@@ -225,7 +231,7 @@ def run(later="2026-04-22", earlier="2026-04-08") -> dict:
         "pair": {"earlier": earlier, "later": later, "sensor": pair["sensor"]},
         "grid": {
             "shape": [height, width],
-            "crs": "EPSG:4326",
+            "crs": ANALYSIS_CRS,
             "transform": [transform.a, transform.b, transform.c, transform.d, transform.e, transform.f],
             "bounds": {"west": west, "south": south, "east": east, "north": north},
             "pixel_m2_albers": stats.get("pixel_m2"),
@@ -294,7 +300,7 @@ def run(later="2026-04-22", earlier="2026-04-08") -> dict:
         "",
         "## 1. Grid and area accounting",
         "",
-        f"- Shared grid shape `{height}×{width}`, CRS EPSG:4326, Assam-Albers pixel area "
+        f"- Shared grid shape `{height}×{width}`, CRS {ANALYSIS_CRS}, pixel size {abs(float(transform.a)):.0f} m, pixel area "
         f"**{stats.get('pixel_m2')} m²** ({stats.get('pixel_km2')} km²).",
         f"- Full envelope pixels: earlier **{stats.get('earlier_full_pixels')}**, later **{stats.get('later_full_pixels')}**.",
         f"- Full envelope area (same pixel area): earlier **{stats.get('earlier_full_km2')} km²**, "

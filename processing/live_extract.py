@@ -137,12 +137,29 @@ def _grid_affine(grid: dict) -> Affine:
     return Affine(*grid["transform"])
 
 
+def _roi_boundary_lonlat(step_deg: float = 0.05) -> tuple[list[float], list[float]]:
+    """Densify the ROI rectangle so projected bounds cover the curved edges."""
+    west, south, east, north = ROI
+    nx = max(2, int(math.ceil((east - west) / step_deg)) + 1)
+    ny = max(2, int(math.ceil((north - south) / step_deg)) + 1)
+    along_x = np.linspace(west, east, nx)
+    along_y = np.linspace(south, north, ny)
+    lons: list[float] = []
+    lats: list[float] = []
+    for lat in (south, north):
+        lons.extend(float(v) for v in along_x)
+        lats.extend([float(lat)] * nx)
+    for lon in (west, east):
+        lons.extend([float(lon)] * ny)
+        lats.extend(float(v) for v in along_y)
+    return lons, lats
+
+
 def _base_grid() -> tuple[rasterio.Affine, int, int, dict]:
-    """Fixed 100 m Assam Albers grid over the Brahmaputra ROI."""
+    """Fixed 100 m Assam Albers grid covering the densified ROI boundary."""
     west, south, east, north = ROI
     bundle = load_crs()
-    corner_lons = (west, west, east, east)
-    corner_lats = (south, north, south, north)
+    corner_lons, corner_lats = _roi_boundary_lonlat()
     xs, ys = bundle.to_metre.transform(corner_lons, corner_lats)
     x_min = min(xs) - GRID_PAD_M
     x_max = max(xs) + GRID_PAD_M
@@ -189,7 +206,11 @@ def _rectangle(ee):
 
 def _mask_clouds(image):
     scl = image.select("SCL")
-    clear = scl.neq(3).And(scl.neq(8)).And(scl.neq(9)).And(scl.neq(10)).And(scl.neq(11))
+    # 0 no-data, 1 saturated/defective, 3 cloud shadow, 8–10 cloud, 11 snow/ice.
+    clear = (
+        scl.neq(0).And(scl.neq(1)).And(scl.neq(3))
+        .And(scl.neq(8)).And(scl.neq(9)).And(scl.neq(10)).And(scl.neq(11))
+    )
     return image.updateMask(clear)
 
 
@@ -219,13 +240,16 @@ def _export_image(ee, sensor: str, collection, region):
     """Median at 100 m inside this tile. Full-resolution medians exhaust Earth Engine memory."""
 
     def at_scale(image):
+        # Earth Engine median is exported in EPSG:4326 at 100 m, then nearest-neighbour
+        # warped onto the fixed Assam Albers 100 m grid in _on_grid.
         return image.clip(region).reproject(crs="EPSG:4326", scale=SCALE_M)
 
     if sensor == "microwave":
         signal = collection.map(lambda image: at_scale(image.select("VV"))).median()
         # Corridor-validated VV water threshold for Assam (calibrated GRD, dB).
         water = signal.lt(VV_DB).unmask(0).toByte().rename("water")
-        method = f"VV < {VV_DB} dB (Assam corridor validated)"
+        method = f"VV < {VV_DB} dB (baseline, not a universal threshold)"
+        counted = collection.map(lambda image: at_scale(image.select("VV")).mask().rename("n")).sum()
     else:
         def prepare(image):
             return at_scale(_mask_clouds(image).select(["B3", "B8", "B11"]))
@@ -233,9 +257,12 @@ def _export_image(ee, sensor: str, collection, region):
         # MNDWI is more stable than NDWI for turbid Brahmaputra water.
         signal = collection.map(prepare).median().normalizedDifference(["B3", "B11"]).rename("MNDWI")
         water = signal.gt(NDWI_THRESHOLD).unmask(0).toByte().rename("water")
-        method = "MNDWI B3 B11 > 0"
+        method = f"MNDWI B3 B11 > {NDWI_THRESHOLD} (baseline, not a universal threshold)"
+        counted = collection.map(
+            lambda image: at_scale(_mask_clouds(image).select(["B3"])).mask().rename("n")
+        ).sum()
     valid = signal.mask().unmask(0).toByte().rename("valid")
-    image = water.addBands(valid)
+    image = water.addBands(valid).addBands(counted.toUint16().rename("n"))
     stamp = ee.Date(collection.aggregate_max("system:time_start")).format("yyyy-MM-dd HH:mm")
     return image, method, stamp
 
@@ -274,10 +301,11 @@ def _tiff_bytes(blob: bytes) -> bytes:
         return buffer.getvalue()
 
 
-def _on_grid(blob: bytes) -> tuple[np.ndarray, np.ndarray, dict]:
+def _on_grid(blob: bytes) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict]:
     transform, _width, _height, grid = _base_grid()
     water = np.zeros((_height, _width), dtype=np.uint8)
     observed = np.zeros((_height, _width), dtype=np.uint8)
+    counts = np.zeros((_height, _width), dtype=np.float32)
     with MemoryFile(_tiff_bytes(blob)) as memory, memory.open() as source:
         raw_water = source.read(1)
         raw_valid = source.read(2) if source.count > 1 else np.ones(raw_water.shape, dtype=np.uint8)
@@ -299,7 +327,17 @@ def _on_grid(blob: bytes) -> tuple[np.ndarray, np.ndarray, dict]:
             dst_crs=ANALYSIS_CRS_WKT,
             resampling=Resampling.nearest,
         )
-    return water.astype(bool), observed.astype(bool), grid
+        if source.count > 2:
+            reproject(
+                source=source.read(3),
+                destination=counts,
+                src_transform=source.transform,
+                src_crs=source.crs,
+                dst_transform=transform,
+                dst_crs=ANALYSIS_CRS_WKT,
+                resampling=Resampling.nearest,
+            )
+    return water.astype(bool), observed.astype(bool), counts, grid
 
 
 def _tiles() -> list[tuple[float, float, float, float]]:
@@ -629,7 +667,7 @@ def _keep(mask: np.ndarray, pixel_km2: float, area_km2: float) -> np.ndarray:
     return remove_small_objects(mask, min_size=max(1, int(round(area_km2 / pixel_km2))))
 
 
-def _fetch(sensor: str, start: date, end_exclusive: date) -> tuple[np.ndarray, np.ndarray, dict, dict]:
+def _fetch(sensor: str, start: date, end_exclusive: date) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict, dict]:
     ee = require_ee()
     collection, _region = _collection(ee, sensor, start, end_exclusive)
     scene_count = int(collection.size().getInfo())
@@ -653,12 +691,13 @@ def _fetch(sensor: str, start: date, end_exclusive: date) -> tuple[np.ndarray, n
             "source": "Google Earth Engine",
         }
         empty = np.zeros((height, width), dtype=bool)
-        return empty, empty.copy(), grid, meta
+        return empty, empty.copy(), np.zeros((height, width), dtype=np.float32), grid, meta
     earliest = str(ee.Date(collection.aggregate_min("system:time_start")).format("yyyy-MM-dd").getInfo())
     latest = str(ee.Date(collection.aggregate_max("system:time_start")).format("yyyy-MM-dd").getInfo())
     when = str(ee.Date(collection.aggregate_max("system:time_start")).format("yyyy-MM-dd HH:mm").getInfo())
     water = np.zeros((height, width), dtype=bool)
     observed = np.zeros((height, width), dtype=bool)
+    counts = np.zeros((height, width), dtype=np.float32)
     tiles = _tiles()
     for index, box in enumerate(tiles, start=1):
         _set_progress(detail=f"Downloading tile {index} of {len(tiles)}")
@@ -667,9 +706,10 @@ def _fetch(sensor: str, start: date, end_exclusive: date) -> tuple[np.ndarray, n
             print(f"  {sensor} tile {index} empty", flush=True)
             continue
         for blob in blobs:
-            tile_water, tile_observed, _grid = _on_grid(blob)
+            tile_water, tile_observed, tile_count, _grid = _on_grid(blob)
             water |= tile_water
             observed |= tile_observed
+            counts = np.maximum(counts, tile_count)
         _set_progress(detail=f"Cleaned tile {index} of {len(tiles)}")
         print(f"  {sensor} tile {index}/{len(tiles)} {start.isoformat()}", flush=True)
     scale = SCALE_M
@@ -689,17 +729,53 @@ def _fetch(sensor: str, start: date, end_exclusive: date) -> tuple[np.ndarray, n
         "water_km2": round(float(water.sum()) * grid["pixel_km2"], 2),
         "bounds": grid["bounds"],
         "source": "Google Earth Engine",
+        "resample": "EPSG:4326 100 m export, nearest onto Assam Albers 100 m",
+        "obs_count_median": round(float(np.median(counts[observed])), 2) if observed.any() else 0.0,
+        "obs_count_ge3_fraction": round(float((counts >= 3).mean()), 4),
     }
-    return water, observed, grid, meta
+    if sensor == "microwave":
+        try:
+            meta["orbit_passes"] = collection.aggregate_histogram("orbitProperties_pass").getInfo()
+        except Exception:
+            meta["orbit_passes"] = None
+        meta["geometry_note"] = "Composite may mix ascending and descending IW scenes. Passes are recorded, not filtered."
+    return water, observed, counts, grid, meta
+
+
+def _latest_acquisition(ee, sensor: str) -> str | None:
+    """Latest scene date over the ROI. Searches recent months, then the archive."""
+    today = date.today()
+    for days in (120, 800, 5000):
+        start = today - timedelta(days=days)
+        collection, _region = _collection(ee, sensor, start, today + timedelta(days=1))
+        count = int(collection.size().getInfo())
+        if count == 0:
+            continue
+        return str(ee.Date(collection.aggregate_max("system:time_start")).format("yyyy-MM-dd").getInfo())
+    return None
 
 
 def latest_report() -> dict:
-    end = date.today().isoformat()
+    suggested = date.today().isoformat()
+    try:
+        ee = require_ee()
+        optical = _latest_acquisition(ee, "optical")
+        microwave = _latest_acquisition(ee, "microwave")
+    except Exception:
+        return {
+            "optical": None,
+            "microwave": None,
+            "end": suggested,
+            "source": "suggested end date",
+            "label": "Suggested end date. Earth Engine did not return an acquisition date.",
+        }
+    end = optical or microwave or suggested
     return {
-        "optical": {"date": end, "when": None},
-        "microwave": {"date": end, "when": None},
+        "optical": {"date": optical, "when": optical} if optical else None,
+        "microwave": {"date": microwave, "when": microwave} if microwave else None,
         "end": end,
-        "source": "Google Earth Engine",
+        "source": "Google Earth Engine" if (optical or microwave) else "suggested end date",
+        "label": "Latest acquisition" if (optical or microwave) else "Suggested end date",
     }
 
 
@@ -745,12 +821,13 @@ def extract_window(start: date, end_exclusive: date, sensor: str = "optical", st
     path = _cache_path(start, end_exclusive, sensor)
     meta_path = path.with_suffix(".json")
     try:
-        water, observed, grid, meta = _fetch(sensor, start, end_exclusive)
+        water, observed, counts, grid, meta = _fetch(sensor, start, end_exclusive)
         path.parent.mkdir(parents=True, exist_ok=True)
         np.savez_compressed(
             path,
             water=pack_mask(water),
             observed=pack_mask(observed),
+            obs_count=counts.astype(np.float32),
             shape=np.array(water.shape, dtype=np.int32),
             pixel_km2=np.array([grid["pixel_km2"]], dtype=np.float64),
             bounds=np.array([grid["bounds"]["west"], grid["bounds"]["south"], grid["bounds"]["east"], grid["bounds"]["north"]]),
@@ -1418,7 +1495,8 @@ def _pair_from_request(req, staged: bool = False, *, fetch_both_sensors: bool | 
     if cache_key in _PAIR_CACHE:
         return _PAIR_CACHE[cache_key]
 
-    want_both = staged if fetch_both_sensors is None else fetch_both_sensors
+    # Download only the selected sensor unless a caller explicitly asks for both.
+    want_both = bool(fetch_both_sensors)
     empty_meta = {"scene_count": 0, "label": "skipped", "latest_scene": None, "method": "skipped"}
 
     def _blank_like(ref: dict) -> dict:
@@ -1544,6 +1622,8 @@ def _pair_from_request(req, staged: bool = False, *, fetch_both_sensors: bool | 
         "banks": compared["banks"],
         "envelopes": compared["envelopes"],
         "transects": compared["transects"],
+        "bankline_qc": compared.get("bankline_qc"),
+        "banks_validated": compared.get("banks_validated"),
         "transect_qc": compared.get("transect_qc"),
         "observation": observation,
         "valid": compared["valid"],
@@ -1707,6 +1787,9 @@ def compare_dates(
         "acquisition": pair.get("acquisition"),
         "observation": obs,
         "transect_qc": tqc,
+        "bankline_qc": pair.get("bankline_qc"),
+        "banks_validated": pair.get("banks_validated"),
+        "overlap_days": req.overlap_days,
         "partial_coverage": bool(pair.get("partial_coverage")),
         "requires_ack": bool(pair.get("partial_coverage")) and not req.acknowledge_partial,
         "min_valid_fraction": pair.get("min_valid_fraction"),
@@ -1744,16 +1827,23 @@ def period_points(end_text: str, start_text: str | None) -> dict:
     }
 
 
-def period_identify(lon: float, lat: float, end_text: str, start_text: str | None) -> dict:
-    pair = _pair(end_text, start_text)
+def period_identify(lon: float, lat: float, end_text: str | None = None, start_text: str | None = None, request=None) -> dict:
+    if request is None:
+        from .date_options import build_compare_request
+
+        request = build_compare_request(mode="dates", later=end_text, earlier=start_text, sensor="optical")
+    pair = _pair_from_request(request, staged=False, fetch_both_sensors=False)
     grid = pair["grid"]
     earlier_label = pair["earlier"]["meta"]["label"]
     later_label = pair["later"]["meta"]["label"]
     row_f, col_f = _pixel_rc(lon, lat, grid)
     row, col = int(np.floor(row_f)), int(np.floor(col_f))
     inside = 0 <= row < grid["height"] and 0 <= col < grid["width"]
+    observed = pair.get("valid")
     if not inside:
         name = "outside"
+    elif observed is not None and not bool(observed[row, col]):
+        name = "nodata"
     elif pair["erosion"][row, col]:
         name = "corridor_expansion"
     elif pair["deposition"][row, col]:
@@ -1763,13 +1853,13 @@ def period_identify(lon: float, lat: float, end_text: str, start_text: str | Non
     elif pair["earlier_body"][row, col] or pair["later_body"][row, col]:
         name = "river"
     else:
-        name = "land"
+        name = "outside_corridor"
     labels = {
         "corridor_expansion": "Corridor expansion (erosion candidate)",
         "corridor_contraction": "Corridor contraction (deposition candidate)",
         "persistent_water": "Persistent corridor",
         "river": "River corridor",
-        "land": "Outside corridor",
+        "outside_corridor": "Outside corridor",
         "nodata": "No observation",
         "outside": "Outside the map",
     }
@@ -2008,7 +2098,7 @@ def begin_compute(later: str | None = None, earlier: str | None = None, **option
                 "error": None,
                 "change": None,
                 "points": None,
-                "step": "Base optical",
+                "step": "Base microwave" if request.sensor == "microwave" else "Base optical",
                 "detail": "Starting",
                 "ticket": ticket,
                 "later": request.later.end.isoformat(),

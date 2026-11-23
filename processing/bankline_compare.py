@@ -30,6 +30,7 @@ from shapely.geometry import LineString, MultiLineString, MultiPoint, Point, Pol
 from shapely.ops import linemerge, nearest_points, unary_union
 
 from .crs import load_crs, to_lonlat, to_metres
+from .date_options import MIN_VALID_FRACTION
 
 # Morphology and QC defaults (metres → pixels using actual pixel size).
 # Single closing radius: bridge internal bars without a second conflicting assignment.
@@ -317,15 +318,22 @@ def _cross_bank_hits(
     points = _points_from(cross.intersection(ring))
     if len(points) < 2:
         return None
-    us = []
+    positive: list[tuple[float, tuple[float, float]]] = []
+    negative: list[tuple[float, tuple[float, float]]] = []
     for px, py in points:
         u = (px - origin[0]) * normal[0] + (py - origin[1]) * normal[1]
-        us.append((u, (px, py)))
-    left = max(us, key=lambda item: item[0])
-    right = min(us, key=lambda item: item[0])
-    if left[0] - right[0] < 200.0:
+        if u > TRANSECT_AXIS_TOL_M:
+            positive.append((u, (px, py)))
+        elif u < -TRANSECT_AXIS_TOL_M:
+            negative.append((u, (px, py)))
+        else:
+            return None
+    # Same rule as transects: exactly one hit on each side. Extra hits are ambiguous.
+    if len(points) > 2 or len(positive) != 1 or len(negative) != 1:
         return None
-    return left[1], right[1]
+    if positive[0][0] - negative[0][0] < 200.0:
+        return None
+    return positive[0][1], negative[0][1]
 
 
 def find_endpoints(
@@ -1124,15 +1132,22 @@ def compare_corridors(
         "earlier_observed_fraction": round(int(earlier_obs.sum()) / max(aoi_pixels, 1), 4),
         "later_observed_fraction": round(int(later_obs.sum()) / max(aoi_pixels, 1), 4),
         "nodata_both_fraction": round(int((aoi & ~earlier_obs & ~later_obs).sum()) / max(aoi_pixels, 1), 4),
+        "coverage_threshold": MIN_VALID_FRACTION,
         "coverage_warning": (
             None
-            if valid_pixels / max(aoi_pixels, 1) >= 0.6
+            if valid_pixels / max(aoi_pixels, 1) >= MIN_VALID_FRACTION
             else (
-                f"Common valid observation covers only "
-                f"{100 * valid_pixels / max(aoi_pixels, 1):.1f}% of the study corridor. "
-                f"Do not claim complete Brahmaputra coverage for this date pair."
+                f"Common valid coverage "
+                f"{100 * valid_pixels / max(aoi_pixels, 1):.1f}% "
+                f"is below {100 * MIN_VALID_FRACTION:.0f}%."
             )
         ),
+    }
+    bankline_qc = {
+        "earlier_left": earlier_bl_qc["left"],
+        "earlier_right": earlier_bl_qc["right"],
+        "later_left": later_bl_qc["left"],
+        "later_right": later_bl_qc["right"],
     }
     return {
         "erosion": erosion,
@@ -1142,12 +1157,11 @@ def compare_corridors(
         "erosion_raw": erosion_raw,
         "deposition_raw": deposition_raw,
         "banks": banks,
-        "bankline_qc": {
-            "earlier_left": earlier_bl_qc["left"],
-            "earlier_right": earlier_bl_qc["right"],
-            "later_left": later_bl_qc["left"],
-            "later_right": later_bl_qc["right"],
-        },
+        "bankline_qc": bankline_qc,
+        "banks_validated": all(
+            bool(side.get("is_simple")) and float(side.get("pct_on_expected_side") or 0) >= 80
+            for side in bankline_qc.values()
+        ),
         "envelopes": {
             "earlier": polygon_feature(earlier.polygon, "earlier_envelope", bundle),
             "later": polygon_feature(later.polygon, "later_envelope", bundle),

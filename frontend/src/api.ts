@@ -73,12 +73,11 @@ export const api = {
     })
   },
   computeStatus: () => getJson<ComputeStatus>('/api/compute'),
-  identify: (lon: number, lat: number, laterId: string, earlierId: string) => {
-    const query = new URLSearchParams({
-      lon: String(lon),
-      lat: String(lat),
-      later: laterId,
-      earlier: earlierId,
+  identify: (lon: number, lat: number, params: Record<string, string | number | boolean>) => {
+    const query = new URLSearchParams({ lon: String(lon), lat: String(lat) })
+    Object.entries(params).forEach(([key, value]) => {
+      if (value === '' || value === undefined || value === null) return
+      query.set(key, String(value))
     })
     return getJson<IdentifyResult>(`/api/identify?${query.toString()}`)
   },
