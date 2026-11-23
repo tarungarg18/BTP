@@ -37,9 +37,27 @@ export const api = {
     getJson<ChangePoints>(`/api/points?later=${encodeURIComponent(laterId)}&earlier=${encodeURIComponent(earlierId)}`),
   periods: () => getJson<Array<{ id: string; label: string | null; water_display: string | null; scene_count: number | null; file: string | null; png: string }>>('/api/periods'),
   latest: () => getJson<{ end: string | null; source: string; optical: { when: string; date: string } | null; microwave: { when: string; date: string } | null }>('/api/latest'),
-  compute: (laterId: string, earlierId: string) => {
-    const query = new URLSearchParams({ later: laterId })
-    if (earlierId) query.set('earlier', earlierId)
+  preflight: (params: Record<string, string | number | boolean>) => {
+    const query = new URLSearchParams()
+    Object.entries(params).forEach(([key, value]) => {
+      if (value === '' || value === undefined || value === null) return
+      query.set(key, String(value))
+    })
+    return getJson<{
+      ok: boolean
+      detail: string | null
+      sensor: string
+      earlier: { scene_count: number; earliest_acquisition: string | null; latest_acquisition: string | null; detail: string }
+      later: { scene_count: number; earliest_acquisition: string | null; latest_acquisition: string | null; detail: string }
+      archive_start: string
+    }>(`/api/preflight?${query.toString()}`)
+  },
+  compute: (params: Record<string, string | number | boolean>) => {
+    const query = new URLSearchParams()
+    Object.entries(params).forEach(([key, value]) => {
+      if (value === '' || value === undefined || value === null) return
+      query.set(key, String(value))
+    })
     return fetch(`/api/compute?${query.toString()}`, { method: 'POST' }).then(async (response) => {
       if (!response.ok) {
         let detail = 'Compute did not start'

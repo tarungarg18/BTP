@@ -1,0 +1,236 @@
+{
+  "pair": {
+    "earlier": "2026-04-08",
+    "later": "2026-04-22",
+    "sensor": "optical"
+  },
+  "grid": {
+    "shape": [
+      3340,
+      7236
+    ],
+    "crs": "EPSG:4326",
+    "transform": [
+      0.0008983111749910168,
+      0.0,
+      89.5,
+      0.0,
+      -0.0008983111749910168,
+      28.5
+    ],
+    "bounds": {
+      "west": 89.5,
+      "south": 25.499640675530003,
+      "east": 96.000179662235,
+      "north": 28.5
+    },
+    "pixel_m2_albers": 8874.859,
+    "pixel_km2_albers": 0.008875,
+    "same_grid_both_dates": true,
+    "close_m": 300.0
+  },
+  "area_accounting": {
+    "source": "envelope & common_valid on shared EPSG:4326 grid; m\u00b2 via Assam Albers pixel area",
+    "earlier_full_pixels": 103724,
+    "later_full_pixels": 302807,
+    "earlier_full_km2": 920.536,
+    "later_full_km2": 2687.369,
+    "earlier_common_valid_pixels": 74692,
+    "later_common_valid_pixels": 29321,
+    "earlier_common_valid_km2": 662.881,
+    "later_common_valid_km2": 260.22,
+    "albers_polygon_earlier_valid_km2": 680.158,
+    "albers_polygon_later_valid_km2": 264.873,
+    "erosion_km2": 21.415,
+    "deposition_km2": 424.076,
+    "net_later_minus_earlier_km2": -402.661,
+    "net_erosion_minus_deposition_km2": -402.661,
+    "accounting_identity_ok": true,
+    "note": "Full-envelope pixel counts are NOT comparable to common-valid areas. Reported erosion/deposition/earlier/later corridor areas use envelope & common_valid only."
+  },
+  "observation": {
+    "corridor_pixels": 3143355,
+    "earlier_valid_pixels": 1473318,
+    "later_valid_pixels": 2796137,
+    "common_valid_pixels": 1185620,
+    "common_valid_fraction_of_corridor": 0.3772,
+    "earlier_observed_fraction": 0.4687,
+    "later_observed_fraction": 0.8895,
+    "nodata_both_fraction": 0.0189,
+    "coverage_warning": "Common valid observation covers only 37.7% of the study corridor. Do not claim complete Brahmaputra coverage for this date pair."
+  },
+  "transect_qc": {
+    "total_transects": 2961,
+    "both_ok": 275,
+    "earlier_only": 536,
+    "later_only": 1542,
+    "neither": 608,
+    "left_bank_ok": 275,
+    "right_bank_ok": 275,
+    "pct_of_guide": 9.29,
+    "pct_of_mutual_span": 99.28,
+    "first_both_ok_chainage_m": 386750.0,
+    "last_both_ok_chainage_m": 455750.0,
+    "max_consecutive_missing_m": 386750.0,
+    "note": "Most guide transects fail because the two date envelopes do not both reach that chainage (cloud / water-mask gaps). Within the mutual envelope span, both_ok coverage should be near 100%."
+  },
+  "banklines": [
+    {
+      "role": "start_left",
+      "geom_type": "LineString",
+      "valid": true,
+      "simple": true,
+      "length_km": 341.53,
+      "vertices": 2153,
+      "first": [
+        93.10582,
+        26.59917
+      ],
+      "last": [
+        91.37388,
+        26.14912
+      ],
+      "max_vertex_gap_m_approx": 549.5,
+      "pct_on_expected_side": 85.4
+    },
+    {
+      "role": "start_right",
+      "geom_type": "LineString",
+      "valid": true,
+      "simple": true,
+      "length_km": 567.04,
+      "vertices": 3774,
+      "first": [
+        93.10582,
+        26.60636
+      ],
+      "last": [
+        91.37298,
+        26.19314
+      ],
+      "max_vertex_gap_m_approx": 548.3,
+      "pct_on_expected_side": 68.3
+    },
+    {
+      "role": "end_left",
+      "geom_type": "LineString",
+      "valid": true,
+      "simple": true,
+      "length_km": 665.42,
+      "vertices": 4424,
+      "first": [
+        95.66062,
+        27.78494
+      ],
+      "last": [
+        92.51294,
+        26.56504
+      ],
+      "max_vertex_gap_m_approx": 549.5,
+      "pct_on_expected_side": 92.7
+    },
+    {
+      "role": "end_right",
+      "geom_type": "LineString",
+      "valid": true,
+      "simple": true,
+      "length_km": 1204.12,
+      "vertices": 7992,
+      "first": [
+        95.66421,
+        27.80471
+      ],
+      "last": [
+        92.51563,
+        26.58839
+      ],
+      "max_vertex_gap_m_approx": 548.3,
+      "pct_on_expected_side": 70.7
+    }
+  ],
+  "endpoints": [
+    {
+      "role": "endpoint_UL",
+      "coordinates": [
+        93.10463,
+        26.59917
+      ]
+    },
+    {
+      "role": "endpoint_UR",
+      "coordinates": [
+        93.106,
+        26.60636
+      ]
+    },
+    {
+      "role": "endpoint_DL",
+      "coordinates": [
+        91.37423,
+        26.14912
+      ]
+    },
+    {
+      "role": "endpoint_DR",
+      "coordinates": [
+        91.37306,
+        26.19314
+      ]
+    },
+    {
+      "role": "later_endpoint_UL",
+      "coordinates": [
+        95.66054,
+        27.78494
+      ]
+    },
+    {
+      "role": "later_endpoint_UR",
+      "coordinates": [
+        95.66351,
+        27.80471
+      ]
+    },
+    {
+      "role": "later_endpoint_DL",
+      "coordinates": [
+        92.51303,
+        26.56504
+      ]
+    },
+    {
+      "role": "later_endpoint_DR",
+      "coordinates": [
+        92.51637,
+        26.58839
+      ]
+    }
+  ],
+  "closing_sensitivity": {
+    "100": {
+      "pixels": 284240,
+      "cols": 3739,
+      "components": 1
+    },
+    "200": {
+      "pixels": 292030,
+      "cols": 3739,
+      "components": 1
+    },
+    "300": {
+      "pixels": 302807,
+      "cols": 3740,
+      "components": 1
+    },
+    "500": {
+      "pixels": 363201,
+      "cols": 4103,
+      "components": 1
+    }
+  },
+  "unresolved": [
+    "Common valid observation covers only 37.7% of the study corridor. Do not claim complete Brahmaputra coverage for this date pair.",
+    "Only 275/2961 transects have both-date intersections (9.29% of full guide). Within the mutual envelope span, coverage is 99.28%.",
+    "Optical-only envelopes for cloudy 15-day windows remain incomplete along parts of Sadiya\u2013Dhubri; microwave is not silently fused into water."
+  ]
+}

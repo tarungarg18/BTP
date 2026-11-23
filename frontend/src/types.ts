@@ -77,6 +77,45 @@ export interface ChangeStats {
   rows: ChangeRow[]
   centerline?: GeoJSON.Feature | null
   banks?: GeoJSON.FeatureCollection | null
+  envelopes?: GeoJSON.FeatureCollection | null
+  earlier_envelope_png?: string | null
+  later_envelope_png?: string | null
+  earlier_envelope_km2?: number | null
+  later_envelope_km2?: number | null
+  valid_fraction?: number | null
+  valid_pixels?: number | null
+  sensor?: string | null
+  request?: {
+    mode?: string
+    sensor?: string
+    window_days?: number
+    earlier?: { start?: string; end?: string; label?: string }
+    later?: { start?: string; end?: string; label?: string }
+  } | null
+  acquisition?: {
+    earlier?: { requested?: string; scene_count?: number; latest_scene?: string | null; method?: string; sensor?: string }
+    later?: { requested?: string; scene_count?: number; latest_scene?: string | null; method?: string; sensor?: string }
+  } | null
+  observation?: {
+    common_valid_fraction_of_corridor?: number
+    earlier_observed_fraction?: number
+    later_observed_fraction?: number
+    coverage_warning?: string | null
+  } | null
+  transect_qc?: {
+    both_ok?: number
+    total_transects?: number
+    pct_of_guide?: number
+    pct_of_mutual_span?: number
+    first_both_ok_chainage_m?: number | null
+    last_both_ok_chainage_m?: number | null
+    note?: string
+  } | null
+  partial_coverage?: boolean
+  requires_ack?: boolean
+  coverage_warning?: string | null
+  min_valid_fraction?: number | null
+  close_m?: number | null
 }
 
 export interface LatestObservation {

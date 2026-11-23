@@ -158,18 +158,78 @@ def _is_day(value: str | None) -> bool:
     return bool(value and re.fullmatch(r"\d{4}-\d{2}-\d{2}", value))
 
 
+@app.get("/api/preflight")
+def preflight(
+    later: str = "",
+    earlier: str = "",
+    sensor: str = "optical",
+    mode: str = "dates",
+    window_days: int = 15,
+    earlier_start: str = "",
+    earlier_end: str = "",
+    later_start: str = "",
+    later_end: str = "",
+) -> dict:
+    from processing.date_options import build_compare_request
+    from processing.gee_init import GeeUnavailable
+    from processing.live_extract import preflight_availability
+
+    try:
+        request = build_compare_request(
+            mode=mode,
+            sensor=sensor,
+            window_days=window_days,
+            later=later or None,
+            earlier=earlier or None,
+            earlier_start=earlier_start or None,
+            earlier_end=earlier_end or None,
+            later_start=later_start or None,
+            later_end=later_end or None,
+        )
+        return preflight_availability(request)
+    except GeeUnavailable as exc:
+        raise HTTPException(503, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
 @app.post("/api/compute")
-def start_compute(later: str, earlier: str = "") -> dict:
-    if not _is_day(later):
-        raise HTTPException(400, "Use an end date as YYYY-MM-DD")
-    if earlier and not _is_day(earlier):
-        raise HTTPException(400, "Use a start date as YYYY-MM-DD")
+def start_compute(
+    later: str = "",
+    earlier: str = "",
+    sensor: str = "optical",
+    mode: str = "dates",
+    window_days: int = 15,
+    earlier_start: str = "",
+    earlier_end: str = "",
+    later_start: str = "",
+    later_end: str = "",
+    acknowledge_partial: bool = False,
+) -> dict:
+    from processing.date_options import build_compare_request
     from processing.live_extract import begin_compute
 
-    started = begin_compute(later, earlier or None)
+    try:
+        request = build_compare_request(
+            mode=mode,
+            sensor=sensor,
+            window_days=window_days,
+            later=later or None,
+            earlier=earlier or None,
+            earlier_start=earlier_start or None,
+            earlier_end=earlier_end or None,
+            later_start=later_start or None,
+            later_end=later_end or None,
+            acknowledge_partial=acknowledge_partial,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    started = begin_compute(request=request)
     if not started:
         raise HTTPException(409, "A comparison is already running")
-    return {"started": True}
+    return {"started": True, "request": request.as_dict()}
 
 
 @app.get("/api/compute")

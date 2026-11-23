@@ -1,0 +1,72 @@
+{
+  "note": "Written from parallel run stdout; period-mode tiles were still downloading so that case is marked pending_cache. CLOSE_M reconciliation uses prior QC numbers (same April 2026 pair).",
+  "close_m_reconciliation": {
+    "300": {
+      "earlier_km2": 662.881,
+      "later_km2": 260.22,
+      "erosion_km2": 21.415,
+      "deposition_km2": 424.076,
+      "net_km2": -402.661,
+      "identity_ok": true,
+      "source": "reports/qc/qc_report.json + live validate ok net=-402.661"
+    },
+    "750": {
+      "earlier_km2": 780.686,
+      "later_km2": 503.764,
+      "erosion_km2": 30.467,
+      "deposition_km2": 307.39,
+      "net_km2": -276.922,
+      "identity_ok": true,
+      "source": "prior QC (750 m era)"
+    },
+    "explanation": "Net changed because CLOSE_M went from 750 m to 300 m. Larger closing merges more braids into the outer corridor; different envelopes change common-valid XOR areas. Accounting identity later-earlier = erosion-deposition held in both runs."
+  },
+  "cases": [
+    {
+      "name": "15_days_apart_april2026",
+      "status": "ok",
+      "sensor": "optical",
+      "window_days": 15,
+      "areas": { "net_km2": -402.661 }
+    },
+    {
+      "name": "1_year_apart_2023_2024_premonsoon",
+      "status": "ok",
+      "sensor": "optical",
+      "window_days": 30,
+      "areas": { "net_km2": -853.096 }
+    },
+    {
+      "name": "same_season_2020_2021",
+      "status": "ok",
+      "sensor": "optical",
+      "window_days": 30,
+      "areas": { "net_km2": -428.327 }
+    },
+    {
+      "name": "5_years_apart_2019_2024_microwave",
+      "status": "ok",
+      "sensor": "microwave",
+      "window_days": 30,
+      "areas": { "net_km2": 100.029 }
+    },
+    {
+      "name": "cloudy_monsoon_optical_2022",
+      "status": "ok",
+      "sensor": "optical",
+      "window_days": 15,
+      "areas": { "net_km2": -2243.058 },
+      "warning": "Extreme net likely driven by monsoon cloud / low valid overlap; treat as partial-coverage case, not full-corridor truth."
+    },
+    {
+      "name": "unavailable_pre_s2_archive",
+      "status": "rejected",
+      "detail": "optical archive starts 2017-03-28; requested window ends 2015-04-08."
+    },
+    {
+      "name": "period_mode_2020_2021_dry",
+      "status": "pending_cache",
+      "detail": "Mode B download was in progress (2020-02 / 2021-02 tiles). Preflight/reject path already proven; finish offline with: python scripts/validate_date_flexibility.py"
+    }
+  ]
+}

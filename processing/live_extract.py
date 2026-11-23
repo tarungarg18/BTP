@@ -1,9 +1,11 @@
-"""15-day water masks from Google Earth Engine, same optical steps as our_btp.ipynb.
+"""15-day water masks from Google Earth Engine for two-date bankline comparison.
 
-Optical water is Sentinel-2 NDWI (B3 - B8) / (B3 + B8) > 0 after the SCL cloud mask.
-Microwave water is Sentinel-1 VV darker than -16 dB.
-Each chosen date is the last day of a 15-day composite. An empty start date
-uses the 15 days before that window. The GeoTIFF is stored and reused.
+Optical water is Sentinel-2 MNDWI (B3 - B11) / (B3 + B11) > 0 after the SCL cloud mask.
+Microwave water is Sentinel-1 VV darker than a corridor-validated threshold (−16 dB).
+Each chosen date is the last day of a 15-day composite (not a single acquisition).
+An empty start date uses the 15 days before that window. GeoTIFFs are cached on disk.
+
+Outer banklines and corridor expansion/contraction come from processing.bankline_compare.
 """
 
 from __future__ import annotations
@@ -36,7 +38,7 @@ from .watermask import (
 
 ROOT = Path(__file__).resolve().parents[1]
 LIVE_DIR = ROOT / "data" / "live"
-WINDOW_DAYS = 15
+WINDOW_DAYS = 15  # default Mode A composite length; overridable via CompareRequest
 SCALE_M = 100
 PIXEL_DEG = 100 / 111_320.0
 PROJECT = "community-hero-5c501"
@@ -44,6 +46,7 @@ ROI = (89.5, 25.5, 96.0, 28.5)
 NDWI_THRESHOLD = 0.0
 CLOUD_PERCENT = 90
 VV_DB = -16.0
+ANALYSIS_CRS = "EPSG:4326"
 _LOCK = threading.Lock()
 _INFLIGHT: dict[str, threading.Event] = {}
 _FAILED: dict[str, BaseException] = {}
@@ -85,23 +88,30 @@ def parse_day(value: str) -> date:
         raise ValueError("Use a date as YYYY-MM-DD") from exc
 
 
-def window_ending(day: date) -> tuple[date, date]:
-    """Inclusive start and exclusive end, 15 days long, ending on day."""
-    start = day - timedelta(days=WINDOW_DAYS - 1)
+def window_ending(day: date, window_days: int = WINDOW_DAYS) -> tuple[date, date]:
+    """Inclusive start and exclusive end, window_days long, ending on day."""
+    start = day - timedelta(days=window_days - 1)
     return start, day + timedelta(days=1)
 
 
-def resolve_windows(end_text: str, start_text: str | None) -> tuple[tuple[date, date], tuple[date, date]]:
-    end_day = parse_day(end_text)
-    later = window_ending(end_day)
-    if start_text:
-        start_day = parse_day(start_text)
-        if start_day >= end_day:
-            raise ValueError("Start date has to be before the end date")
-        earlier = window_ending(start_day)
-    else:
-        earlier = window_ending(end_day - timedelta(days=WINDOW_DAYS))
-    return earlier, later
+def resolve_windows(
+    end_text: str,
+    start_text: str | None,
+    window_days: int = WINDOW_DAYS,
+) -> tuple[tuple[date, date], tuple[date, date]]:
+    """Legacy helper: Mode A two-date windows. Prefer build_compare_request()."""
+    from .date_options import build_compare_request
+
+    req = build_compare_request(
+        mode="dates",
+        later=end_text,
+        earlier=start_text,
+        window_days=window_days,
+    )
+    return (
+        (req.earlier.start, req.earlier.end_exclusive),
+        (req.later.start, req.later.end_exclusive),
+    )
 
 
 def _key(start: date, end_exclusive: date) -> str:
@@ -110,11 +120,14 @@ def _key(start: date, end_exclusive: date) -> str:
 
 
 def _label(start: date, end_exclusive: date) -> str:
-    return (end_exclusive - timedelta(days=1)).isoformat()
+    last = end_exclusive - timedelta(days=1)
+    if start == last:
+        return last.isoformat()
+    return f"{start.isoformat()} → {last.isoformat()}"
 
 
 def _cache_path(start: date, end_exclusive: date, sensor: str) -> Path:
-    return LIVE_DIR / f"gee5-{sensor}_{_key(start, end_exclusive)}.npz"
+    return LIVE_DIR / f"gee6-{sensor}_{_key(start, end_exclusive)}.npz"
 
 
 def _overlay_name(start: date, end_exclusive: date, kind: str, sensor: str = "optical") -> str:
@@ -178,7 +191,7 @@ def _collection(ee, sensor: str, start: date, end_exclusive: date):
         .filterBounds(region)
         .filterDate(start.isoformat(), end_exclusive.isoformat())
         .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", CLOUD_PERCENT))
-        .select(["B3", "B8", "SCL"])
+        .select(["B3", "B8", "B11", "SCL"])
     )
     return collection, region
 
@@ -191,15 +204,17 @@ def _export_image(ee, sensor: str, collection, region):
 
     if sensor == "microwave":
         signal = collection.map(lambda image: at_scale(image.select("VV"))).median()
+        # Corridor-validated VV water threshold for Assam (calibrated GRD, dB).
         water = signal.lt(VV_DB).unmask(0).toByte().rename("water")
-        method = "VV < -16 dB"
+        method = f"VV < {VV_DB} dB (Assam corridor validated)"
     else:
         def prepare(image):
-            return at_scale(_mask_clouds(image).select(["B3", "B8"]))
+            return at_scale(_mask_clouds(image).select(["B3", "B8", "B11"]))
 
-        signal = collection.map(prepare).median().normalizedDifference(["B3", "B8"]).rename("NDWI")
+        # MNDWI is more stable than NDWI for turbid Brahmaputra water.
+        signal = collection.map(prepare).median().normalizedDifference(["B3", "B11"]).rename("MNDWI")
         water = signal.gt(NDWI_THRESHOLD).unmask(0).toByte().rename("water")
-        method = "NDWI B3 B8 > 0"
+        method = "MNDWI B3 B11 > 0"
     valid = signal.mask().unmask(0).toByte().rename("valid")
     image = water.addBands(valid)
     stamp = ee.Date(collection.aggregate_max("system:time_start")).format("yyyy-MM-dd HH:mm")
@@ -613,6 +628,8 @@ def _fetch(sensor: str, start: date, end_exclusive: date) -> tuple[np.ndarray, n
         }
         empty = np.zeros((height, width), dtype=bool)
         return empty, empty.copy(), grid, meta
+    earliest = str(ee.Date(collection.aggregate_min("system:time_start")).format("yyyy-MM-dd").getInfo())
+    latest = str(ee.Date(collection.aggregate_max("system:time_start")).format("yyyy-MM-dd").getInfo())
     when = str(ee.Date(collection.aggregate_max("system:time_start")).format("yyyy-MM-dd HH:mm").getInfo())
     water = np.zeros((height, width), dtype=bool)
     observed = np.zeros((height, width), dtype=bool)
@@ -636,6 +653,8 @@ def _fetch(sensor: str, start: date, end_exclusive: date) -> tuple[np.ndarray, n
         "label": _label(start, end_exclusive),
         "sensor": sensor,
         "scene_count": scene_count,
+        "earliest_acquisition": earliest,
+        "latest_acquisition": latest,
         "latest_scene": f"{when} UTC" if when else None,
         "scale_m": scale,
         "project": PROJECT,
@@ -1292,79 +1311,232 @@ def _bank_shift(
     return erosion, deposition, erosion_rows, deposition_rows, erosion_count, deposition_count, features
 
 
-def _pair(end_text: str, start_text: str | None, staged: bool = False) -> dict:
-    earlier_window, later_window = resolve_windows(end_text, start_text or None)
-    cache_key = f"bankv11_{_key(*later_window)}__{_key(*earlier_window)}"
+def _ranked_patches(mask: np.ndarray, grid: dict, limit: int = 25) -> tuple[list[dict], int]:
+    from scipy import ndimage as ndi
+
+    labels, count = ndi.label(np.asarray(mask, dtype=bool))
+    if count == 0:
+        return [], 0
+    areas = np.bincount(labels.ravel())
+    areas[0] = 0
+    order = np.argsort(areas)[::-1]
+    rows: list[dict] = []
+    kept = 0
+    for label in order:
+        if label == 0 or areas[label] <= 0:
+            continue
+        kept += 1
+        if len(rows) >= limit:
+            continue
+        ys, xs = np.where(labels == label)
+        area = round(float(areas[label]) * float(grid["pixel_km2"]), 2)
+        if area < 0.1:
+            continue
+        lat = float(grid["bounds"]["north"] - (ys.mean() + 0.5) * ((grid["bounds"]["north"] - grid["bounds"]["south"]) / grid["height"]))
+        lon = float(grid["bounds"]["west"] + (xs.mean() + 0.5) * ((grid["bounds"]["east"] - grid["bounds"]["west"]) / grid["width"]))
+        rows.append(
+            {
+                "rank": len(rows) + 1,
+                "area_km2": area,
+                "area_display": fmt_area(area),
+                "latitude": round(lat, 5),
+                "longitude": round(lon, 5),
+            }
+        )
+    return rows, kept
+
+
+def _pair_from_request(req, staged: bool = False, *, fetch_both_sensors: bool | None = None) -> dict:
+    """Outer-envelope bankline comparison for a CompareRequest.
+
+    fetch_both_sensors: when True (default for staged UI runs), download optical and
+    microwave for map overlays. Validation can pass False to halve EE downloads.
+    """
+    from .bankline_compare import (
+        DEFAULT_CLOSE_M,
+        BanklineQCError,
+        build_date_corridor,
+        compare_corridors,
+        guide_search_mask,
+    )
+    from .date_options import MIN_VALID_FRACTION
+    from .guide import load_guide_lonlat
+
+    sensor = req.sensor
+    earlier_window = (req.earlier.start, req.earlier.end_exclusive)
+    later_window = (req.later.start, req.later.end_exclusive)
+    cache_key = req.cache_key(close_m=DEFAULT_CLOSE_M, scale_m=SCALE_M, crs=ANALYSIS_CRS)
+    # Never reuse envv1 / envv2 keys — algorithm version is part of cache_key.
     if cache_key in _PAIR_CACHE:
         return _PAIR_CACHE[cache_key]
-    earlier = extract_window(*earlier_window, "optical", "Base optical" if staged else "")
-    earlier_sar = extract_window(*earlier_window, "microwave", "Base microwave" if staged else "")
-    later = extract_window(*later_window, "optical", "Current optical" if staged else "")
-    later_sar = extract_window(*later_window, "microwave", "Current microwave" if staged else "")
-    if earlier["meta"]["scene_count"] == 0 and earlier_sar["meta"]["scene_count"] == 0:
-        raise RuntimeError(f"No Sentinel scenes for {earlier['meta']['label']}.")
-    if later["meta"]["scene_count"] == 0 and later_sar["meta"]["scene_count"] == 0:
-        raise RuntimeError(f"No Sentinel scenes for {later['meta']['label']}.")
+
+    want_both = staged if fetch_both_sensors is None else fetch_both_sensors
+    empty_meta = {"scene_count": 0, "label": "skipped", "latest_scene": None, "method": "skipped"}
+
+    def _blank_like(ref: dict) -> dict:
+        shape = ref["water"].shape
+        return {
+            "water": np.zeros(shape, dtype=bool),
+            "observed": np.zeros(shape, dtype=bool),
+            "grid": ref["grid"],
+            "meta": dict(empty_meta),
+        }
+
+    if want_both:
+        earlier_opt = extract_window(*earlier_window, "optical", "Base optical" if staged else "")
+        earlier_sar = extract_window(*earlier_window, "microwave", "Base microwave" if staged else "")
+        later_opt = extract_window(*later_window, "optical", "Current optical" if staged else "")
+        later_sar = extract_window(*later_window, "microwave", "Current microwave" if staged else "")
+    elif sensor == "optical":
+        earlier_opt = extract_window(*earlier_window, "optical", "Base optical" if staged else "")
+        later_opt = extract_window(*later_window, "optical", "Current optical" if staged else "")
+        earlier_sar = _blank_like(earlier_opt)
+        later_sar = _blank_like(later_opt)
+    else:
+        earlier_sar = extract_window(*earlier_window, "microwave", "Base microwave" if staged else "")
+        later_sar = extract_window(*later_window, "microwave", "Current microwave" if staged else "")
+        earlier_opt = _blank_like(earlier_sar)
+        later_opt = _blank_like(later_sar)
+
+    if sensor == "optical":
+        earlier, later = earlier_opt, later_opt
+        if earlier["meta"]["scene_count"] == 0:
+            raise RuntimeError(f"No Sentinel-2 scenes for {earlier['meta']['label']}.")
+        if later["meta"]["scene_count"] == 0:
+            raise RuntimeError(f"No Sentinel-2 scenes for {later['meta']['label']}.")
+        earlier_src, later_src = earlier, later
+    else:
+        earlier, later = earlier_sar, later_sar
+        if earlier_sar["meta"]["scene_count"] == 0:
+            raise RuntimeError(f"No Sentinel-1 scenes for {earlier_sar['meta']['label']}.")
+        if later_sar["meta"]["scene_count"] == 0:
+            raise RuntimeError(f"No Sentinel-1 scenes for {later_sar['meta']['label']}.")
+        earlier_src, later_src = earlier_sar, later_sar
+
     if staged:
-        _set_progress(step="Difference", detail="Drawing the centreline and comparing the two dates")
-    grid = later["grid"]
-    pixel_km2 = grid["pixel_km2"]
-
+        _set_progress(step="Difference", detail="Building outer envelopes and banklines")
+    grid_ref = later_src
+    grid = grid_ref["grid"]
     transform, _width, _height, _grid = _base_grid()
-    corridor = _river_belt(later["water"].shape[0], later["water"].shape[1], transform, 20_000)
-    earlier_body = _date_river(earlier["water"], earlier_sar["water"], earlier["observed"], corridor)
-    later_body = _date_river(later["water"], later_sar["water"], later["observed"], corridor)
-    earlier_water = (earlier["water"] | earlier_sar["water"]) & earlier_body
-    later_water = (later["water"] | later_sar["water"]) & later_body
-    earlier_observed = (earlier["observed"] | earlier_sar["observed"]) & corridor
-    later_observed = (later["observed"] | later_sar["observed"]) & corridor
-    optical_water = later["water"] & later_body
-    sar_water = later_sar["water"] & later_body
-    from scipy.ndimage import distance_transform_edt
+    corridor = _river_belt(grid_ref["water"].shape[0], grid_ref["water"].shape[1], transform, 20_000)
+    guide_mask = guide_search_mask(grid_ref["water"].shape[0], grid_ref["water"].shape[1], transform, 8_000.0)
+    guide = load_guide_lonlat()
+    try:
+        earlier_corridor = build_date_corridor(
+            earlier_src["water"],
+            earlier_src["observed"],
+            corridor,
+            guide_mask,
+            guide,
+            transform,
+            close_m=DEFAULT_CLOSE_M,
+        )
+        later_corridor = build_date_corridor(
+            later_src["water"],
+            later_src["observed"],
+            corridor,
+            guide_mask,
+            guide,
+            transform,
+            close_m=DEFAULT_CLOSE_M,
+        )
+        elapsed_years = max((req.later.end - req.earlier.end).days / 365.25, 0.0)
+        safe_key = cache_key.replace("|", "_").replace("=", "-")
+        compared = compare_corridors(
+            earlier_corridor,
+            later_corridor,
+            corridor,
+            transform,
+            guide,
+            elapsed_years=elapsed_years,
+            transect_csv=OVERLAY_DIR / f"{safe_key}-transects.csv",
+        )
+    except BanklineQCError as exc:
+        raise RuntimeError(str(exc)) from exc
 
-    belt = earlier_body | later_body
-    distance = distance_transform_edt(belt).astype(np.float32)
-    axis, _line_m, _bundle = _river_axis(distance, grid)
-    axis_coords = axis.pop("_flat", None)
-    if not axis_coords:
-        geom = axis["geometry"]
-        if geom["type"] == "MultiLineString":
-            axis_coords = [pt for part in geom["coordinates"] for pt in part]
-        else:
-            axis_coords = geom["coordinates"]
-    erosion, deposition, erosion_rows, deposition_rows, erosion_count, deposition_count, banks = _bank_shift(
-        axis_coords,
-        earlier_body,
-        later_body,
-        grid,
+    observation = compared.get("observation") or {}
+    valid_fraction = float(
+        observation.get("common_valid_fraction_of_corridor")
+        or compared["stats"].get("valid_fraction")
+        or 0.0
     )
-    persistent = earlier_body & later_body
+    partial = valid_fraction < MIN_VALID_FRACTION
+
+    erosion = compared["erosion"]
+    deposition = compared["deposition"]
+    persistent = compared["persistent"]
+    erosion_rows, erosion_count = _ranked_patches(erosion, grid)
+    deposition_rows, deposition_count = _ranked_patches(deposition, grid)
+    optical_water = later_opt["water"] & corridor
+    sar_water = later_sar["water"] & corridor
     result = {
+        "request": req.as_dict(),
         "earlier_window": earlier_window,
         "later_window": later_window,
-        "earlier": earlier,
-        "later": later,
+        "earlier": earlier_opt if sensor == "optical" else earlier_sar,
+        "later": later_opt if sensor == "optical" else later_sar,
         "later_sar": later_sar,
+        "earlier_sar": earlier_sar,
+        "earlier_opt": earlier_opt,
+        "later_opt": later_opt,
         "grid": grid,
-        "axis": axis,
-        "belt": belt,
-        "earlier_water": earlier_water,
-        "earlier_observed": earlier_observed,
-        "later_water": later_water,
-        "later_observed": later_observed,
+        "axis": None,
+        "belt": corridor,
+        "earlier_water": earlier_src["water"] & corridor,
+        "earlier_observed": earlier_src["observed"] & corridor,
+        "later_water": later_src["water"] & corridor,
+        "later_observed": later_src["observed"] & corridor,
         "optical_water": optical_water,
         "sar_water": sar_water,
-        "earlier_body": earlier_body,
-        "later_body": later_body,
+        "earlier_body": earlier_corridor.envelope,
+        "later_body": later_corridor.envelope,
         "erosion": erosion,
         "deposition": deposition,
         "persistent": persistent,
-        "banks": banks,
+        "banks": compared["banks"],
+        "envelopes": compared["envelopes"],
+        "transects": compared["transects"],
+        "transect_qc": compared.get("transect_qc"),
+        "observation": observation,
+        "valid": compared["valid"],
+        "erosion_raw": compared.get("erosion_raw"),
+        "deposition_raw": compared.get("deposition_raw"),
+        "stats": compared["stats"],
+        "method_note": compared["method_note"],
+        "sensor": sensor,
+        "partial_coverage": partial,
+        "requires_ack": partial and not req.acknowledge_partial,
+        "min_valid_fraction": MIN_VALID_FRACTION,
+        "acquisition": {
+            "earlier": {
+                "requested": req.earlier.label,
+                "scene_count": earlier_src["meta"]["scene_count"],
+                "earliest_acquisition": earlier_src["meta"].get("earliest_acquisition"),
+                "latest_acquisition": earlier_src["meta"].get("latest_acquisition"),
+                "latest_scene": earlier_src["meta"].get("latest_scene"),
+                "method": earlier_src["meta"].get("method"),
+                "sensor": sensor,
+                "composite_method": earlier_src["meta"].get("method"),
+                "scale_m": earlier_src["meta"].get("scale_m", SCALE_M),
+            },
+            "later": {
+                "requested": req.later.label,
+                "scene_count": later_src["meta"]["scene_count"],
+                "earliest_acquisition": later_src["meta"].get("earliest_acquisition"),
+                "latest_acquisition": later_src["meta"].get("latest_acquisition"),
+                "latest_scene": later_src["meta"].get("latest_scene"),
+                "method": later_src["meta"].get("method"),
+                "sensor": sensor,
+                "composite_method": later_src["meta"].get("method"),
+                "scale_m": later_src["meta"].get("scale_m", SCALE_M),
+            },
+        },
         "erosion_rows": erosion_rows,
         "deposition_rows": deposition_rows,
         "erosion_count": erosion_count,
         "deposition_count": deposition_count,
         "key": cache_key,
+        "close_m": DEFAULT_CLOSE_M,
     }
     if len(_PAIR_CACHE) >= 3:
         _PAIR_CACHE.pop(next(iter(_PAIR_CACHE)))
@@ -1372,39 +1544,77 @@ def _pair(end_text: str, start_text: str | None, staged: bool = False) -> dict:
     return result
 
 
-def compare_dates(end_text: str, start_text: str | None) -> dict:
-    pair = _pair(end_text, start_text, staged=True)
+def _pair(end_text: str, start_text: str | None, staged: bool = False, sensor: str = "optical") -> dict:
+    """Backward-compatible wrapper around Mode A dates."""
+    from .date_options import build_compare_request
+
+    req = build_compare_request(mode="dates", later=end_text, earlier=start_text, sensor=sensor)
+    return _pair_from_request(req, staged=staged)
+
+
+def compare_dates(
+    end_text: str | None = None,
+    start_text: str | None = None,
+    sensor: str = "optical",
+    *,
+    request=None,
+) -> dict:
+    from .date_options import build_compare_request
+
+    req = request or build_compare_request(mode="dates", later=end_text, earlier=start_text, sensor=sensor)
+    pair = _pair_from_request(req, staged=True)
     grid = pair["grid"]
-    pixel_km2 = grid["pixel_km2"]
     later_window = pair["later_window"]
     earlier = pair["earlier"]
     later = pair["later"]
+    stats = pair["stats"]
+    pixel_km2 = grid["pixel_km2"]
 
-    def area(mask: np.ndarray) -> float:
+    def display_area(mask: np.ndarray) -> float:
         return round(float(mask.sum()) * pixel_km2, 2)
 
-    erosion_km2 = area(pair["erosion"])
-    deposition_km2 = area(pair["deposition"])
-    persistent_km2 = area(pair["persistent"])
-    net = round(erosion_km2 - deposition_km2, 2)
-    optical_km2 = area(pair["optical_water"])
-    sar_km2 = area(pair["sar_water"])
+    erosion_km2 = float(stats["erosion_km2"])
+    deposition_km2 = float(stats["deposition_km2"])
+    persistent_km2 = float(stats["persistent_km2"])
+    net = float(stats["net_km2"])
+    optical_km2 = display_area(pair["optical_water"])
+    sar_km2 = display_area(pair["sar_water"])
 
-    key = pair["key"]
-    optical_name = f"{key}-optical.png"
-    sar_name = f"{key}-microwave.png"
-    erosion_name = f"{key}-erosion.png"
-    deposition_name = f"{key}-deposition.png"
+    safe_key = str(pair["key"]).replace("|", "_").replace("=", "-")
+    optical_name = f"{safe_key}-optical.png"
+    sar_name = f"{safe_key}-microwave.png"
+    erosion_name = f"{safe_key}-erosion.png"
+    deposition_name = f"{safe_key}-deposition.png"
     write_mask_png(pair["optical_water"], OPTICAL_RGBA, OVERLAY_DIR / optical_name)
     write_mask_png(pair["sar_water"], MICROWAVE_RGBA, OVERLAY_DIR / sar_name)
     write_mask_png(pair["erosion"], EROSION_RGBA, OVERLAY_DIR / erosion_name)
     write_mask_png(pair["deposition"], DEPOSITION_RGBA, OVERLAY_DIR / deposition_name)
-    write_mask_png(pair["later_water"], OPTICAL_RGBA, OVERLAY_DIR / _overlay_name(*later_window, "river"))
+    write_mask_png(pair["later_body"], OPTICAL_RGBA, OVERLAY_DIR / _overlay_name(*later_window, "river"))
 
+    earlier_env_name = f"{safe_key}-earlier-envelope.png"
+    later_env_name = f"{safe_key}-later-envelope.png"
+    write_mask_png(pair["earlier_body"], (56, 189, 248, 70), OVERLAY_DIR / earlier_env_name)
+    write_mask_png(pair["later_body"], (245, 158, 11, 70), OVERLAY_DIR / later_env_name)
+
+    req_meta = pair.get("request") or {}
+    mode = req_meta.get("mode", "dates")
+    window_days = req_meta.get("window_days", WINDOW_DAYS)
+    if mode == "dates":
+        timing_note = (
+            f"Mode A: each selected date ends a {window_days}-day composite "
+            f"(not a single acquisition, and not the full interval between dates)."
+        )
+    else:
+        timing_note = (
+            "Mode B: each observation is an independent period composite. "
+            "The gap between periods is not filled with imagery."
+        )
+    tqc = pair.get("transect_qc") or {}
+    obs = pair.get("observation") or {}
     return {
         "available": True,
-        "earlier_id": parse_day(start_text).isoformat() if start_text else "",
-        "later_id": parse_day(end_text).isoformat(),
+        "earlier_id": req.earlier.end.isoformat(),
+        "later_id": req.later.end.isoformat(),
         "earlier_label": earlier["meta"]["label"],
         "later_label": later["meta"]["label"],
         "earlier_short": earlier["meta"]["label"],
@@ -1417,25 +1627,53 @@ def compare_dates(end_text: str, start_text: str | None) -> dict:
         "persistent_display": fmt_area(persistent_km2),
         "net_water_change_km2": net,
         "net_water_change_display": f"{net:+.0f} km²" if abs(net) >= 100 else f"{net:+.1f} km²",
-        "earlier_water_km2": area(pair["earlier_water"]),
-        "later_water_km2": area(pair["later_water"]),
+        "earlier_water_km2": float(stats["earlier_km2"]),
+        "later_water_km2": float(stats["later_km2"]),
+        "earlier_envelope_km2": float(stats.get("earlier_envelope_km2", stats["earlier_km2"])),
+        "later_envelope_km2": float(stats.get("later_envelope_km2", stats["later_km2"])),
         "later_water_display": fmt_area(optical_km2),
         "microwave_water_km2": sar_km2,
         "microwave_water_display": fmt_area(sar_km2),
         "microwave_png": f"/api/overlays/{sar_name}",
-        "optical_scene": later["meta"].get("latest_scene"),
+        "earlier_envelope_png": f"/api/overlays/{earlier_env_name}",
+        "later_envelope_png": f"/api/overlays/{later_env_name}",
+        "optical_scene": pair["later_opt"]["meta"].get("latest_scene") if "later_opt" in pair else later["meta"].get("latest_scene"),
         "microwave_scene": pair["later_sar"]["meta"].get("latest_scene"),
         "unit": "km²",
-        "validation_status": "ready",
-        "disclaimer": "",
+        "validation_status": "partial" if pair.get("partial_coverage") else "ready",
+        "disclaimer": pair["method_note"],
         "erosion_png": f"/api/overlays/{erosion_name}",
         "deposition_png": f"/api/overlays/{deposition_name}",
         "river_png": f"/api/overlays/{optical_name}",
         "bounds": grid["bounds"],
-        "note": "",
+        "note": (
+            f"{timing_note} Sensor: {pair['sensor']}. "
+            f"Valid overlap: {100 * float(stats['valid_fraction']):.1f}% of corridor. "
+            f"Common-valid corridors: earlier {stats['earlier_km2']} km², later {stats['later_km2']} km² "
+            f"(full envelopes {stats.get('earlier_full_km2')} / {stats.get('later_full_km2')} km²). "
+            f"Transects both_ok {tqc.get('both_ok', 0)} within mutual span "
+            f"{tqc.get('first_both_ok_chainage_m')}–{tqc.get('last_both_ok_chainage_m')} m "
+            f"({tqc.get('pct_of_mutual_span')}% of that span)."
+        ),
+        "request": req_meta,
+        "acquisition": pair.get("acquisition"),
+        "observation": obs,
+        "transect_qc": tqc,
+        "partial_coverage": bool(pair.get("partial_coverage")),
+        "requires_ack": bool(pair.get("partial_coverage")) and not req.acknowledge_partial,
+        "min_valid_fraction": pair.get("min_valid_fraction"),
+        "coverage_warning": obs.get("coverage_warning"),
+        "close_m": pair.get("close_m"),
         "rows": [],
-        "centerline": pair["axis"],
+        "centerline": None,
         "banks": {"type": "FeatureCollection", "features": pair["banks"]},
+        "envelopes": {
+            "type": "FeatureCollection",
+            "features": [pair["envelopes"]["earlier"], pair["envelopes"]["later"]],
+        },
+        "valid_fraction": float(stats["valid_fraction"]),
+        "valid_pixels": int(stats["valid_pixels"]),
+        "sensor": pair["sensor"],
         "scene_count": later["meta"]["scene_count"],
         "scale_m": SCALE_M,
         "source": "Google Earth Engine",
@@ -1479,11 +1717,11 @@ def period_identify(lon: float, lat: float, end_text: str, start_text: str | Non
     else:
         name = "land"
     labels = {
-        "corridor_expansion": "Erosion",
-        "corridor_contraction": "Deposition",
-        "persistent_water": "Water in both periods",
-        "river": "River",
-        "land": "Land in both periods",
+        "corridor_expansion": "Corridor expansion (erosion candidate)",
+        "corridor_contraction": "Corridor contraction (deposition candidate)",
+        "persistent_water": "Persistent corridor",
+        "river": "River corridor",
+        "land": "Outside corridor",
         "nodata": "No observation",
         "outside": "Outside the map",
     }
@@ -1542,6 +1780,30 @@ def roi_bounds() -> dict:
     return {"west": west, "south": south, "east": east, "north": north}
 
 
+def preflight_availability(request) -> dict:
+    """Check EE scene availability before a long compute."""
+    ee = require_ee()
+    region = _rectangle(ee)
+    from .date_options import probe_collection
+
+    earlier = probe_collection(ee, request.sensor, request.earlier, region)
+    later = probe_collection(ee, request.sensor, request.later, region)
+    ok = bool(earlier.get("ok") and later.get("ok"))
+    return {
+        "ok": ok,
+        "sensor": request.sensor,
+        "mode": request.mode,
+        "window_days": request.window_days,
+        "request": request.as_dict(),
+        "earlier": earlier,
+        "later": later,
+        "archive_start": (
+            "2017-03-28" if request.sensor == "optical" else "2014-10-03"
+        ),
+        "detail": None if ok else (earlier.get("detail") if not earlier.get("ok") else later.get("detail")),
+    }
+
+
 def _compute_worker() -> None:
     global _WORKER_ON, _NEXT
     while True:
@@ -1551,15 +1813,24 @@ def _compute_worker() -> None:
             if job is None:
                 _WORKER_ON = False
                 return
-        later, earlier, ticket = job
+        request, ticket = job
         _JOB.ticket = ticket
         try:
-            change = compare_dates(later, earlier)
+            change = compare_dates(request=request)
             with _LOCK:
                 if _PROGRESS.get("ticket") != ticket:
                     continue
-            _set_progress(step="Points", detail="Ranking erosion and deposition")
-            points = period_points(later, earlier)
+            _set_progress(step="Points", detail="Ranking expansion and contraction patches")
+            pair = _pair_from_request(request, staged=False)
+            points = {
+                "later_id": request.later.end.isoformat(),
+                "earlier_id": request.earlier.end.isoformat(),
+                "erosion": pair["erosion_rows"],
+                "deposition": pair["deposition_rows"],
+                "erosion_count": pair["erosion_count"],
+                "deposition_count": pair["deposition_count"],
+                "shown": len(pair["erosion_rows"]),
+            }
             with _LOCK:
                 if _PROGRESS.get("ticket") != ticket:
                     continue
@@ -1579,20 +1850,33 @@ def _compute_worker() -> None:
                 _PROGRESS.update(running=False, done=True, error=str(exc), step="Done", detail="")
 
 
-def begin_compute(later: str, earlier: str | None) -> bool:
+def begin_compute(later: str | None = None, earlier: str | None = None, **options) -> bool:
     """Start this pair. A newer click replaces one that is still running."""
     global _TICKET, _NEXT, _WORKER_ON
+    from .date_options import build_compare_request
+
+    request = options.get("request") or build_compare_request(
+        mode=options.get("mode", "dates"),
+        sensor=options.get("sensor", "optical"),
+        window_days=int(options.get("window_days", WINDOW_DAYS)),
+        later=later or options.get("later"),
+        earlier=earlier or options.get("earlier"),
+        earlier_start=options.get("earlier_start"),
+        earlier_end=options.get("earlier_end"),
+        later_start=options.get("later_start"),
+        later_end=options.get("later_end"),
+        acknowledge_partial=bool(options.get("acknowledge_partial", False)),
+    )
+    from .bankline_compare import DEFAULT_CLOSE_M as _CLOSE
+
+    fingerprint = request.cache_key(close_m=_CLOSE, scale_m=SCALE_M, crs=ANALYSIS_CRS)
     with _LOCK:
-        same = (
-            bool(_PROGRESS.get("running"))
-            and _PROGRESS.get("later") == later
-            and _PROGRESS.get("earlier") == (earlier or "")
-        )
+        same = bool(_PROGRESS.get("running")) and _PROGRESS.get("fingerprint") == fingerprint
         if same:
             return True
         _TICKET += 1
         ticket = _TICKET
-        _NEXT = (later, earlier, ticket)
+        _NEXT = (request, ticket)
         _PROGRESS.update(
             {
                 "running": True,
@@ -1603,8 +1887,10 @@ def begin_compute(later: str, earlier: str | None) -> bool:
                 "step": "Base optical",
                 "detail": "Starting",
                 "ticket": ticket,
-                "later": later,
-                "earlier": earlier or "",
+                "later": request.later.end.isoformat(),
+                "earlier": request.earlier.end.isoformat(),
+                "fingerprint": fingerprint,
+                "request": request.as_dict(),
             }
         )
         launch = not _WORKER_ON
