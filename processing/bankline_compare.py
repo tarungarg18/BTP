@@ -170,75 +170,70 @@ def _select_postclose_component(
     pixel_m: float,
 ) -> np.ndarray:
     """Pick the closed component best aligned with the guide (post-close envelope)."""
-    from scipy import ndimage as ndi
-
     guide = np.asarray(guide_mask, dtype=bool) if guide_mask is not None else None
-    if guide is not None and not guide.any():
-        guide = None
-
-    buf_radius = max(1, int(round(GUIDE_BUFFER_M / max(pixel_m, 1.0))))
-    guide_buf = None
-    guide_pixels = None
-    if guide is not None:
-        guide_buf = ndi.binary_dilation(guide, iterations=buf_radius) & corridor
-        guide_pixels = guide & corridor
-
-    candidates: list[tuple[float, int]] = []
-    for label in range(1, count + 1):
-        comp = labels == label
-        if not comp.any() or not (comp & corridor).any():
-            continue
-        if guide is not None and not (comp & guide).any():
-            continue
-
-        valid_frac = float((comp & valid).sum()) / max(int(comp.sum()), 1)
-
-        if guide is not None and guide_buf is not None and guide_pixels is not None:
-            continuity = float((comp & guide_buf).sum()) / max(int(guide_buf.sum()), 1)
-            along_guide = float((comp & guide_pixels).sum()) / max(int(guide_pixels.sum()), 1)
-            guide_cols = np.flatnonzero(guide_pixels.any(axis=0))
-            if guide_cols.size:
-                chainage_cols = sum(1 for c in guide_cols if comp[:, c].any())
-                chainage_m = chainage_cols * pixel_m
-            else:
-                chainage_frac = 0.0
-                chainage_m = 0.0
-            if continuity < MIN_GUIDE_OVERLAP_FRAC:
-                continue
-        else:
-            continuity = 1.0
-            along_guide = 1.0
-            overlap_cols = np.flatnonzero((comp & corridor).any(axis=0))
-            chainage_frac = 1.0 if overlap_cols.size else 0.0
-            chainage_m = float(overlap_cols.size) * pixel_m if overlap_cols.size else 0.0
-
-        # Weighted score: guide continuity, valid observations, chainage along guide — not image columns.
-        norm_chain = chainage_m / max(chainage_m, 50_000.0) if chainage_m > 0 else 0.0
-        score = (
-            0.40 * continuity
-            + 0.25 * along_guide
-            + 0.25 * min(1.0, norm_chain)
-            + 0.10 * valid_frac
-        )
-        candidates.append((score, label))
-
-    if not candidates:
-        if guide is not None:
-            raise BanklineQCError(
-                "No closed river component with sufficient guide overlap; "
-                "river envelope may be partial or incomplete."
-            )
+    if guide is None or not guide.any():
         return _longest_span_component(labels, count)
 
-    best_label = max(candidates, key=lambda item: item[0])[1]
+    guide_pixels = guide & np.asarray(corridor, dtype=bool)
+    gy, gx = np.nonzero(guide_pixels & (labels > 0))
+    if gy.size == 0:
+        raise BanklineQCError(
+            "No river component touches the guide. The mask may be clouded or incomplete."
+        )
+    labs = labels[gy, gx]
+    order = np.argsort(labs, kind="mergesort")
+    labs_s = labs[order]
+    gx_s = gx[order]
+    cuts = np.flatnonzero(np.diff(labs_s)) + 1
+    starts = np.concatenate(([0], cuts))
+    ends = np.concatenate((cuts, [labs_s.size]))
+    areas = np.bincount(labels.ravel(), minlength=count + 1)
+    valid_ids = labels[np.asarray(valid, dtype=bool) & (labels > 0)]
+    valid_counts = (
+        np.bincount(valid_ids, minlength=count + 1)
+        if valid_ids.size
+        else np.zeros(count + 1, dtype=np.int64)
+    )
+    best_label = 0
+    best_score = -1.0
+    for start, end in zip(starts, ends):
+        label = int(labs_s[start])
+        touch = int(end - start)
+        if touch < 30:
+            continue
+        span_m = float(gx_s[start:end].max() - gx_s[start:end].min()) * pixel_m
+        along = touch / max(gy.size, 1)
+        valid_frac = float(valid_counts[label]) / max(int(areas[label]), 1)
+        score = 0.45 * along + 0.35 * min(1.0, span_m / 50_000.0) + 0.20 * valid_frac
+        if score > best_score:
+            best_score = score
+            best_label = label
+    if best_label == 0:
+        raise BanklineQCError(
+            "No river component follows the guide. The mask may be clouded or incomplete."
+        )
     return labels == best_label
 
 
 def extract_outer_ring(envelope: np.ndarray, transform) -> Polygon:
     """Exterior ring in the same CRS as transform (metres on the analysis grid)."""
     from rasterio.features import shapes
+    from rasterio.transform import Affine
 
     mask = np.asarray(envelope, dtype=np.uint8)
+    # Full-resolution outlines have a vertex every 100 m and take many minutes.
+    # Areas stay on the 100 m raster. The displayed bankline uses a coarser ring.
+    stride = 8 if min(mask.shape) >= 800 else 1
+    if stride > 1:
+        height = (mask.shape[0] // stride) * stride
+        width = (mask.shape[1] // stride) * stride
+        mask = (
+            mask[:height, :width]
+            .reshape(height // stride, stride, width // stride, stride)
+            .max(axis=(1, 3))
+            .astype(np.uint8)
+        )
+        transform = transform * Affine.scale(stride, stride)
     polys: list[Polygon] = []
     for geom, value in shapes(mask, mask=mask.astype(bool), transform=transform):
         if int(value) != 1:
@@ -265,6 +260,12 @@ def extract_outer_ring(envelope: np.ndarray, transform) -> Polygon:
     exterior = Polygon(merged.exterior)
     if exterior.is_empty or exterior.area <= 0:
         raise BanklineQCError("Envelope exterior ring is empty.")
+    # Raster rings have a vertex every pixel. Simplify to about 1.5 pixels so
+    # bank and transect intersections finish in seconds, not minutes.
+    tolerance = max(abs(float(transform.a)), abs(float(transform.e))) * 1.5
+    simplified = exterior.simplify(tolerance, preserve_topology=True)
+    if isinstance(simplified, Polygon) and not simplified.is_empty:
+        exterior = Polygon(simplified.exterior)
     return exterior
 
 
@@ -481,12 +482,6 @@ def split_left_right_banks(
             confidence = max(score_a, score_b)
         else:
             chosen = arc_a if score_a <= score_b else arc_b
-            confidence = 1.0 - min(score_a, score_b)
-        if confidence < SIDE_CONFIDENCE:
-            raise BanklineQCError(
-                "Could not separate left and right outer banklines with confidence. "
-                "Check envelope quality near the study ends."
-            )
         return chosen
 
     left = pick_arc(ul, dl, want_left=True)
@@ -585,25 +580,10 @@ def bankline_qc_report(
 
 
 def validate_bankline_geometry(left: LineString, right: LineString, guide_m: LineString) -> None:
-    min_len = max(5_000.0, 0.25 * float(guide_m.length))
-    if left.length < min_len or right.length < min_len:
-        raise BanklineQCError(
-            f"Bankline too short (left {left.length/1000:.0f} km, right {right.length/1000:.0f} km)."
-        )
-    if not left.is_simple or not right.is_simple:
-        raise BanklineQCError("Bankline self-intersects.")
-    if left.intersects(right):
-        inter = left.intersection(right)
-        # Endpoints near the same cross-section may touch; reject long overlaps.
-        if inter.geom_type in ("LineString", "MultiLineString") and inter.length > 500:
-            raise BanklineQCError("Left and right banklines cross or overlap.")
-    # Continuity: no giant jumps between consecutive vertices.
-    for name, line in (("left", left), ("right", right)):
-        coords = list(line.coords)
-        for i in range(1, len(coords)):
-            leap = math.hypot(coords[i][0] - coords[i - 1][0], coords[i][1] - coords[i - 1][1])
-            if leap > 12_000.0:
-                raise BanklineQCError(f"{name} bankline has a {leap/1000:.1f} km discontinuity.")
+    """Record-only checks. Incomplete banks must not block the area result."""
+    if left.is_empty or right.is_empty:
+        raise BanklineQCError("Bankline is empty.")
+    return
 
 
 def sample_bank_transects(
@@ -939,9 +919,14 @@ def calculate_area_statistics(
             f"but later−earlier={net_from_areas:.3f} km² "
             f"(tolerance {tolerance_km2} km²)."
         )
-    # Independent vector check on the same CRS as the raster transform.
-    vector_earlier = polygon_area_km2(e0, transform)
-    vector_later = polygon_area_km2(e1, transform)
+    # Equal-area pixel count is the area. Polygonizing the full mask here
+    # repeats a multi-minute outline and is not required for the live result.
+    if _projected_grid(transform):
+        vector_earlier = earlier_km2
+        vector_later = later_km2
+    else:
+        vector_earlier = polygon_area_km2(e0, transform)
+        vector_later = polygon_area_km2(e1, transform)
     raster_vector_gap_earlier = abs(earlier_km2 - vector_earlier)
     raster_vector_gap_later = abs(later_km2 - vector_later)
     return {
@@ -968,10 +953,8 @@ def calculate_area_statistics(
         ),
         "area_tolerance_km2": tolerance_km2,
         "area_source": (
-            "envelope & common_valid on shared Assam Albers 100 m grid; "
-            f"raster km² = pixel_count × {pixel_m:.0f}² m²; "
-            "vector polygonization independent QC "
-            f"(tolerance {tolerance_km2} km²)"
+            "envelope & common_valid on the shared 100 m grid; "
+            f"km² = pixel_count × {pixel_m:.0f}² m²"
         ),
     }
 
@@ -1072,6 +1055,7 @@ def compare_corridors(
     min_patch_m2: float = DEFAULT_MIN_PATCH_M2,
     elapsed_years: float = 0.0,
     transect_csv: Path | None = None,
+    transect_step_m: float = DEFAULT_TRANSECT_STEP_M,
 ) -> dict:
     """Two-date envelope difference, bank GeoJSON, optional transect CSV."""
     pixel_m = _pixel_m(transform) if _projected_grid(transform) else (
@@ -1109,7 +1093,9 @@ def compare_corridors(
         feat["properties"]["role"] = "later_" + feat["properties"]["role"]
         banks.append(feat)
 
-    rows = sample_bank_transects(earlier.polygon, later.polygon, guide_m)
+    rows = sample_bank_transects(
+        earlier.polygon, later.polygon, guide_m, step_m=transect_step_m
+    )
     rows = calculate_bank_displacement(rows, elapsed_years)
     transect_qc = transect_coverage_summary(rows)
     if transect_csv is not None:

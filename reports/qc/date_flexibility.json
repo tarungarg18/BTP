@@ -1,62 +1,228 @@
 {
-  "note": "Written from parallel run stdout; period-mode tiles were still downloading so that case is marked pending_cache. CLOSE_M reconciliation uses prior QC numbers (same April 2026 pair).",
   "close_m_reconciliation": {
-    "300": {
-      "earlier_km2": 662.881,
-      "later_km2": 260.22,
-      "erosion_km2": 21.415,
-      "deposition_km2": 424.076,
-      "net_km2": -402.661,
-      "identity_ok": true,
-      "source": "reports/qc/qc_report.json + live validate ok net=-402.661"
-    },
-    "750": {
-      "earlier_km2": 780.686,
-      "later_km2": 503.764,
-      "erosion_km2": 30.467,
-      "deposition_km2": 307.39,
-      "net_km2": -276.922,
-      "identity_ok": true,
-      "source": "prior QC (750 m era)"
-    },
-    "explanation": "Net changed because CLOSE_M went from 750 m to 300 m. Larger closing merges more braids into the outer corridor; different envelopes change common-valid XOR areas. Accounting identity later-earlier = erosion-deposition held in both runs."
+    "error": "No closed river component with sufficient guide overlap; river envelope may be partial or incomplete.",
+    "traceback": "Traceback (most recent call last):\n  File \"D:\\SEM 7\\BTP\\brahmaputra-bank-change-portal\\processing\\live_extract.py\", line 1473, in _pair_from_request\n    \n    \n    ...<7 lines>...\n            DEFAULT_CLOSE_M,\n            ^\n  File \"D:\\SEM 7\\BTP\\brahmaputra-bank-change-portal\\processing\\bankline_compare.py\", line 1029, in build_date_corridor\n        transform,\n    \n    ...<6 lines>...\n        )\n        ^\n  File \"D:\\SEM 7\\BTP\\brahmaputra-bank-change-portal\\processing\\bankline_compare.py\", line 113, in build_outer_river_envelope\n    # Pre-close: score guide continuity (do not keep every guide-touching lake/tributary).\n              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n    network = _select_postclose_component(\n    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n        labels, count, guide_mask, corridor_b, valid_b, pixel_m=pixel_m\n    \n  File \"D:\\SEM 7\\BTP\\brahmaputra-bank-change-portal\\processing\\bankline_compare.py\", line 226, in _select_postclose_component\n    if guide is not None:\n        ^^^^^^^^^^^^^^^^^\n    ...<2 lines>...\n            \"river envelope may be partial or incomplete.\"\n    \nprocessing.bankline_compare.BanklineQCError: No closed river component with sufficient guide overlap; river envelope may be partial or incomplete.\n\nThe above exception was the direct cause of the following exception:\n\nTraceback (most recent call last):\n  File \"D:\\SEM 7\\BTP\\brahmaputra-bank-change-portal\\scripts\\validate_date_flexibility.py\", line 301, in main\n    recon = reconcile_close_m()\n  File \"D:\\SEM 7\\BTP\\brahmaputra-bank-change-portal\\scripts\\validate_date_flexibility.py\", line 210, in reconcile_close_m\n    pair = _pair_from_request(req, staged=False, fetch_both_sensors=False)\n  File \"D:\\SEM 7\\BTP\\brahmaputra-bank-change-portal\\processing\\live_extract.py\", line 1503, in _pair_from_request\n    shape = ref[\"water\"].shape\nRuntimeError: No closed river component with sufficient guide overlap; river envelope may be partial or incomplete.\n"
   },
   "cases": [
     {
       "name": "15_days_apart_april2026",
       "status": "ok",
-      "sensor": "optical",
-      "window_days": 15,
-      "areas": { "net_km2": -402.661 }
+      "key": "envv3|sensor=optical|mode=dates|win=15|earlier=2026-03-25_2026-04-08|later=2026-04-08_2026-04-22|close_m=300|scale_m=100|crs=EPSG:4326|class=MNDWI_B3_B11_gt_0",
+      "algorithm": "envv3",
+      "preflight": {
+        "earlier_scenes": 86,
+        "later_scenes": 152,
+        "earlier_acq": [
+          "2026-03-25",
+          "2026-04-08"
+        ],
+        "later_acq": [
+          "2026-04-08",
+          "2026-04-22"
+        ]
+      },
+      "areas": {
+        "earlier_km2": 662.881,
+        "later_km2": 260.22,
+        "erosion_km2": 21.415,
+        "deposition_km2": 424.076,
+        "net_km2": -402.661,
+        "valid_fraction": 0.3772,
+        "close_m": 300.0,
+        "identity_ok": true
+      },
+      "transect_qc": {
+        "total_transects": 2961,
+        "both_ok": 275,
+        "earlier_only": 536,
+        "later_only": 1542,
+        "neither": 608,
+        "left_bank_ok": 275,
+        "right_bank_ok": 275,
+        "pct_of_guide": 9.29,
+        "pct_of_mutual_span": 99.28,
+        "first_both_ok_chainage_m": 386750.0,
+        "last_both_ok_chainage_m": 455750.0,
+        "max_consecutive_missing_m": 386750.0,
+        "note": "Most guide transects fail because the two date envelopes do not both reach that chainage (cloud / water-mask gaps). Within the mutual envelope span, both_ok coverage should be near 100%."
+      },
+      "partial_coverage": true
     },
     {
       "name": "1_year_apart_2023_2024_premonsoon",
       "status": "ok",
-      "sensor": "optical",
-      "window_days": 30,
-      "areas": { "net_km2": -853.096 }
+      "key": "envv3|sensor=optical|mode=dates|win=30|earlier=2023-03-17_2023-04-15|later=2024-03-17_2024-04-15|close_m=300|scale_m=100|crs=EPSG:4326|class=MNDWI_B3_B11_gt_0",
+      "algorithm": "envv3",
+      "preflight": {
+        "earlier_scenes": 246,
+        "later_scenes": 249,
+        "earlier_acq": [
+          "2023-03-17",
+          "2023-04-15"
+        ],
+        "later_acq": [
+          "2024-03-18",
+          "2024-04-15"
+        ]
+      },
+      "areas": {
+        "earlier_km2": 3948.842,
+        "later_km2": 3095.746,
+        "erosion_km2": 356.858,
+        "deposition_km2": 1209.954,
+        "net_km2": -853.096,
+        "valid_fraction": 0.9901,
+        "close_m": 300.0,
+        "identity_ok": true
+      },
+      "transect_qc": {
+        "total_transects": 2961,
+        "both_ok": 2438,
+        "earlier_only": 521,
+        "later_only": 2,
+        "neither": 0,
+        "left_bank_ok": 2438,
+        "right_bank_ok": 2438,
+        "pct_of_guide": 82.34,
+        "pct_of_mutual_span": 99.8,
+        "first_both_ok_chainage_m": 0.0,
+        "last_both_ok_chainage_m": 610500.0,
+        "max_consecutive_missing_m": 129500.0,
+        "note": "Most guide transects fail because the two date envelopes do not both reach that chainage (cloud / water-mask gaps). Within the mutual envelope span, both_ok coverage should be near 100%."
+      },
+      "partial_coverage": false
     },
     {
       "name": "same_season_2020_2021",
       "status": "ok",
-      "sensor": "optical",
-      "window_days": 30,
-      "areas": { "net_km2": -428.327 }
+      "key": "envv3|sensor=optical|mode=dates|win=30|earlier=2020-03-17_2020-04-15|later=2021-03-17_2021-04-15|close_m=300|scale_m=100|crs=EPSG:4326|class=MNDWI_B3_B11_gt_0",
+      "algorithm": "envv3",
+      "preflight": {
+        "earlier_scenes": 308,
+        "later_scenes": 308,
+        "earlier_acq": [
+          "2020-03-17",
+          "2020-04-15"
+        ],
+        "later_acq": [
+          "2021-03-17",
+          "2021-04-15"
+        ]
+      },
+      "areas": {
+        "earlier_km2": 3602.731,
+        "later_km2": 3174.404,
+        "erosion_km2": 438.888,
+        "deposition_km2": 867.216,
+        "net_km2": -428.327,
+        "valid_fraction": 0.9981,
+        "close_m": 300.0,
+        "identity_ok": false
+      },
+      "transect_qc": {
+        "total_transects": 2961,
+        "both_ok": 2959,
+        "earlier_only": 0,
+        "later_only": 2,
+        "neither": 0,
+        "left_bank_ok": 2959,
+        "right_bank_ok": 2959,
+        "pct_of_guide": 99.93,
+        "pct_of_mutual_span": 99.93,
+        "first_both_ok_chainage_m": 0.0,
+        "last_both_ok_chainage_m": 740000.0,
+        "max_consecutive_missing_m": 500.0,
+        "note": "Most guide transects fail because the two date envelopes do not both reach that chainage (cloud / water-mask gaps). Within the mutual envelope span, both_ok coverage should be near 100%."
+      },
+      "partial_coverage": false
     },
     {
       "name": "5_years_apart_2019_2024_microwave",
       "status": "ok",
-      "sensor": "microwave",
-      "window_days": 30,
-      "areas": { "net_km2": 100.029 }
+      "key": "envv3|sensor=microwave|mode=dates|win=30|earlier=2019-10-17_2019-11-15|later=2024-10-17_2024-11-15|close_m=300|scale_m=100|crs=EPSG:4326|class=VV_lt_-16dB",
+      "algorithm": "envv3",
+      "preflight": {
+        "earlier_scenes": 75,
+        "later_scenes": 72,
+        "earlier_acq": [
+          "2019-10-18",
+          "2019-11-15"
+        ],
+        "later_acq": [
+          "2024-10-17",
+          "2024-11-15"
+        ]
+      },
+      "areas": {
+        "earlier_km2": 4804.298,
+        "later_km2": 4904.327,
+        "erosion_km2": 575.446,
+        "deposition_km2": 475.417,
+        "net_km2": 100.029,
+        "valid_fraction": 0.9981,
+        "close_m": 300.0,
+        "identity_ok": true
+      },
+      "transect_qc": {
+        "total_transects": 2961,
+        "both_ok": 2948,
+        "earlier_only": 2,
+        "later_only": 7,
+        "neither": 4,
+        "left_bank_ok": 2948,
+        "right_bank_ok": 2948,
+        "pct_of_guide": 99.56,
+        "pct_of_mutual_span": 99.56,
+        "first_both_ok_chainage_m": 0.0,
+        "last_both_ok_chainage_m": 740000.0,
+        "max_consecutive_missing_m": 1000.0,
+        "note": "Most guide transects fail because the two date envelopes do not both reach that chainage (cloud / water-mask gaps). Within the mutual envelope span, both_ok coverage should be near 100%."
+      },
+      "partial_coverage": false
     },
     {
       "name": "cloudy_monsoon_optical_2022",
       "status": "ok",
-      "sensor": "optical",
-      "window_days": 15,
-      "areas": { "net_km2": -2243.058 },
-      "warning": "Extreme net likely driven by monsoon cloud / low valid overlap; treat as partial-coverage case, not full-corridor truth."
+      "key": "envv3|sensor=optical|mode=dates|win=15|earlier=2022-07-01_2022-07-15|later=2022-08-01_2022-08-15|close_m=300|scale_m=100|crs=EPSG:4326|class=MNDWI_B3_B11_gt_0",
+      "algorithm": "envv3",
+      "preflight": {
+        "earlier_scenes": 138,
+        "later_scenes": 99,
+        "earlier_acq": [
+          "2022-07-02",
+          "2022-07-15"
+        ],
+        "later_acq": [
+          "2022-08-01",
+          "2022-08-14"
+        ]
+      },
+      "areas": {
+        "earlier_km2": 5575.506,
+        "later_km2": 3332.447,
+        "erosion_km2": 21.752,
+        "deposition_km2": 2264.811,
+        "net_km2": -2243.058,
+        "valid_fraction": 0.5852,
+        "close_m": 300.0,
+        "identity_ok": false
+      },
+      "transect_qc": {
+        "total_transects": 2961,
+        "both_ok": 2004,
+        "earlier_only": 937,
+        "later_only": 15,
+        "neither": 5,
+        "left_bank_ok": 2004,
+        "right_bank_ok": 2004,
+        "pct_of_guide": 67.68,
+        "pct_of_mutual_span": 97.8,
+        "first_both_ok_chainage_m": 0.0,
+        "last_both_ok_chainage_m": 512000.0,
+        "max_consecutive_missing_m": 228000.0,
+        "note": "Most guide transects fail because the two date envelopes do not both reach that chainage (cloud / water-mask gaps). Within the mutual envelope span, both_ok coverage should be near 100%."
+      },
+      "partial_coverage": true
     },
     {
       "name": "unavailable_pre_s2_archive",
@@ -65,8 +231,47 @@
     },
     {
       "name": "period_mode_2020_2021_dry",
-      "status": "pending_cache",
-      "detail": "Mode B download was in progress (2020-02 / 2021-02 tiles). Preflight/reject path already proven; finish offline with: python scripts/validate_date_flexibility.py"
+      "status": "ok",
+      "key": "envv3|sensor=optical|mode=periods|win=44|earlier=2020-02-01_2020-03-15|later=2021-02-01_2021-03-15|close_m=300|scale_m=100|crs=EPSG:4326|class=MNDWI_B3_B11_gt_0",
+      "algorithm": "envv3",
+      "preflight": {
+        "earlier_scenes": 447,
+        "later_scenes": 444,
+        "earlier_acq": [
+          "2020-02-01",
+          "2020-03-15"
+        ],
+        "later_acq": [
+          "2021-02-02",
+          "2021-03-15"
+        ]
+      },
+      "areas": {
+        "earlier_km2": 3277.423,
+        "later_km2": 2891.101,
+        "erosion_km2": 475.098,
+        "deposition_km2": 861.42,
+        "net_km2": -386.323,
+        "valid_fraction": 0.9981,
+        "close_m": 300.0,
+        "identity_ok": false
+      },
+      "transect_qc": {
+        "total_transects": 2961,
+        "both_ok": 2881,
+        "earlier_only": 78,
+        "later_only": 2,
+        "neither": 0,
+        "left_bank_ok": 2881,
+        "right_bank_ok": 2881,
+        "pct_of_guide": 97.3,
+        "pct_of_mutual_span": 99.93,
+        "first_both_ok_chainage_m": 19500.0,
+        "last_both_ok_chainage_m": 740000.0,
+        "max_consecutive_missing_m": 19500.0,
+        "note": "Most guide transects fail because the two date envelopes do not both reach that chainage (cloud / water-mask gaps). Within the mutual envelope span, both_ok coverage should be near 100%."
+      },
+      "partial_coverage": false
     }
   ]
 }

@@ -80,7 +80,7 @@ function progressSteps(sensor: 'optical' | 'microwave', mode: 'dates' | 'periods
   if (sensor === 'microwave') {
     return [...microwave, ...tail]
   }
-  return [...optical, ...microwave, ...tail]
+  return [...optical, ...tail]
 }
 
 export default function AnalysisView({ summary }: AnalysisViewProps): React.JSX.Element {
@@ -114,6 +114,7 @@ export default function AnalysisView({ summary }: AnalysisViewProps): React.JSX.
   const [focus, setFocus] = useState<{ lat: number; lon: number; token: number } | null>(null)
   const [hit, setHit] = useState<IdentifyResult | null>(null)
   const [resultFingerprint, setResultFingerprint] = useState<string | null>(null)
+  const posted = useRef(false)
   const locateToken = useRef(0)
   const requestGen = useRef(0)
   const activeComputeGen = useRef(0)
@@ -171,6 +172,12 @@ export default function AnalysisView({ summary }: AnalysisViewProps): React.JSX.
     const read = (): void => {
       void api.computeStatus().then((status: ComputeStatus) => {
         if (stop || activeComputeGen.current !== gen) return
+        if (posted.current && !status.running && !status.done && !status.step) {
+          setRunning(false)
+          setError('Press Compute again.')
+          posted.current = false
+          return
+        }
         setStep(normalizeProgressStep(status.step))
         setDetail(status.detail)
         if (!status.done) return
@@ -257,7 +264,9 @@ export default function AnalysisView({ summary }: AnalysisViewProps): React.JSX.
       }
       if (activeComputeGen.current !== gen) return
       setDetail('Starting downloads')
-      return api.compute(params)
+      return api.compute(params).then(() => {
+        if (activeComputeGen.current === gen) posted.current = true
+      })
     }).catch((err: unknown) => {
       if (activeComputeGen.current !== gen) return
       const message = err instanceof Error ? err.message : 'Compute did not start'
@@ -292,7 +301,7 @@ export default function AnalysisView({ summary }: AnalysisViewProps): React.JSX.
   }
 
   const place = hit?.pixel_label
-  const acceptedPartial = !change?.requires_ack || ackApplies
+  const acceptedPartial = Boolean(change)
   const steps = progressSteps(sensor, mode)
   const erosionText = acceptedPartial ? (change?.erosion_display ?? '—') : '—'
   const depositionText = acceptedPartial ? (change?.deposition_display ?? '—') : '—'
@@ -382,8 +391,10 @@ export default function AnalysisView({ summary }: AnalysisViewProps): React.JSX.
         </div>
         {error && <p className="note">{error}</p>}
         {change?.overlap_days ? <p className="note">Windows overlap {change.overlap_days} days.</p> : null}
-        {change?.partial_coverage && !ackApplies && <p className="note">Partial coverage. Tick the box to show areas.</p>}
-        {change && change.banks_validated === false && <p className="note">Bankline check failed.</p>}
+        {change?.partial_coverage && (
+          <p className="note">Partial coverage {((change.valid_fraction ?? 0) * 100).toFixed(0)}%.</p>
+        )}
+        {change && change.banks_validated === false && <p className="note">Banklines cover only the observed reach.</p>}
         <div className="checks">
           <label className="check"><input type="checkbox" checked={showRiver} onChange={() => setShowRiver((value) => !value)} /> Optical water</label>
           <label className="check"><input type="checkbox" checked={showMicrowave} onChange={() => setShowMicrowave((value) => !value)} /> Microwave water</label>

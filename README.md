@@ -1,19 +1,14 @@
 # Brahmaputra Bank Change Portal
 
-Assam main stem, Sadiya to Dhubri. Compare two Sentinel-2 or Sentinel-1 observations and map corridor expansion and contraction candidates.
+Assam main stem, Sadiya to Dhubri. Compare two Sentinel-2 or Sentinel-1 observations and map corridor expansion and contraction.
 
-## What it does
+## Comparison
 
-Mode A compares two dates. Each date is the end of a 1, 15, 30, or 60 day composite. The gap between the dates is not filled in.
+Mode A uses two dates. Each date is the last day of a composite window of 1, 15, 30, or 60 days. Both dates use the same window. The time between the two dates is not composited.
 
-Mode B compares two explicit periods. The later period must start after the earlier period ends.
+Mode B uses two periods. Each period has its own start and end. The later period must start after the earlier period ends.
 
-Water baselines, recorded with every run and not treated as universal rules:
-
-- Sentinel-2: MNDWI (B3, B11) greater than 0, after SCL masking
-- Sentinel-1: VV less than -16 dB
-
-The comparison uses a fixed 100 m Assam Albers grid. Areas are corridor expansion and contraction candidates on pixels observed in both dates. Unobserved pixels are not treated as land. River stage and season can produce a similar pattern.
+Sentinel-2 water is MNDWI from bands B3 and B11, greater than 0, after the SCL mask. Sentinel-1 water is VV less than -16 dB. The analysis grid is a fixed 100 m Assam Albers raster. Areas are calculated only where both dates have a valid observation.
 
 ## Run locally
 
@@ -25,7 +20,7 @@ cd frontend && npm install && npm run dev
 
 Open http://localhost:5173
 
-Downloads are cached under `data/live` and are not committed.
+Saved downloads stay in `data/live` and are not part of the repository.
 
 ## Another computer
 
@@ -33,4 +28,4 @@ Downloads are cached under `data/live` and are not committed.
 python -c "import ee; ee.Authenticate(auth_mode='localhost', scopes=['https://www.googleapis.com/auth/earthengine','https://www.googleapis.com/auth/cloud-platform'])"
 ```
 
-The Earth Engine project is `community-hero-5c501`. Override it with `GEE_PROJECT`. Do not commit Google credentials.
+The Earth Engine project is `community-hero-5c501`. Set `GEE_PROJECT` to use another project.

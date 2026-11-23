@@ -66,6 +66,14 @@ _NEXT: tuple[str, str | None, int] | None = None
 _WORKER_ON = False
 
 
+def _job_cancelled() -> bool:
+    ticket = getattr(_JOB, "ticket", None)
+    if ticket is None:
+        return False
+    with _LOCK:
+        return _PROGRESS.get("ticket") != ticket
+
+
 def _set_progress(**fields: object) -> None:
     ticket = getattr(_JOB, "ticket", None)
     with _LOCK:
@@ -671,6 +679,8 @@ def _fetch(sensor: str, start: date, end_exclusive: date) -> tuple[np.ndarray, n
     ee = require_ee()
     collection, _region = _collection(ee, sensor, start, end_exclusive)
     scene_count = int(collection.size().getInfo())
+    if _job_cancelled():
+        raise RuntimeError("cancelled")
     last = end_exclusive - timedelta(days=1)
     method = "VV < -16 dB" if sensor == "microwave" else "NDWI B3 B8 > 0"
     transform, width, height, grid = _base_grid()
@@ -700,6 +710,8 @@ def _fetch(sensor: str, start: date, end_exclusive: date) -> tuple[np.ndarray, n
     counts = np.zeros((height, width), dtype=np.float32)
     tiles = _tiles()
     for index, box in enumerate(tiles, start=1):
+        if _job_cancelled():
+            raise RuntimeError("cancelled")
         _set_progress(detail=f"Downloading tile {index} of {len(tiles)}")
         blobs = _read_box(ee, sensor, collection, box)
         if not blobs:
@@ -1548,6 +1560,8 @@ def _pair_from_request(req, staged: bool = False, *, fetch_both_sensors: bool | 
     guide_mask = guide_search_mask(grid_ref["water"].shape[0], grid_ref["water"].shape[1], transform, 8_000.0)
     guide = load_guide_lonlat()
     try:
+        if staged:
+            _set_progress(detail="Earlier outline")
         earlier_corridor = build_date_corridor(
             earlier_src["water"],
             earlier_src["observed"],
@@ -1557,6 +1571,8 @@ def _pair_from_request(req, staged: bool = False, *, fetch_both_sensors: bool | 
             transform,
             close_m=DEFAULT_CLOSE_M,
         )
+        if staged:
+            _set_progress(detail="Later outline")
         later_corridor = build_date_corridor(
             later_src["water"],
             later_src["observed"],
@@ -1568,6 +1584,8 @@ def _pair_from_request(req, staged: bool = False, *, fetch_both_sensors: bool | 
         )
         elapsed_years = max((req.later.end - req.earlier.end).days / 365.25, 0.0)
         safe_key = cache_key.replace("|", "_").replace("=", "-")
+        if staged:
+            _set_progress(detail="Comparing the two outlines")
         compared = compare_corridors(
             earlier_corridor,
             later_corridor,
@@ -1575,7 +1593,7 @@ def _pair_from_request(req, staged: bool = False, *, fetch_both_sensors: bool | 
             transform,
             guide,
             elapsed_years=elapsed_years,
-            transect_csv=OVERLAY_DIR / f"{safe_key}-transects.csv",
+            transect_step_m=2_000.0,
         )
     except BanklineQCError as exc:
         raise RuntimeError(str(exc)) from exc
@@ -2058,6 +2076,8 @@ def _compute_worker() -> None:
                     detail="Ready",
                 )
         except Exception as exc:  # noqa: BLE001
+            if str(exc) == "cancelled":
+                continue
             with _LOCK:
                 if _PROGRESS.get("ticket") != ticket:
                     continue
