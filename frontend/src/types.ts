@@ -76,6 +76,7 @@ export interface ChangeStats {
   note: string | null
   rows: ChangeRow[]
   centerline?: GeoJSON.Feature | null
+  banks?: GeoJSON.FeatureCollection | null
 }
 
 export interface LatestObservation {

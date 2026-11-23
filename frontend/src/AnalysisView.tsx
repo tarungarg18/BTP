@@ -85,6 +85,8 @@ export default function AnalysisView({ summary }: AnalysisViewProps): React.JSX.
   const [showMicrowave, setShowMicrowave] = useState(true)
   const [showErosion, setShowErosion] = useState(true)
   const [showDeposition, setShowDeposition] = useState(true)
+  const [showStartBank, setShowStartBank] = useState(true)
+  const [showEndBank, setShowEndBank] = useState(true)
   const [pick, setPick] = useState<{ lat: number; lon: number } | null>(null)
   const [focus, setFocus] = useState<{ lat: number; lon: number; token: number } | null>(null)
   const [hit, setHit] = useState<IdentifyResult | null>(null)
@@ -140,8 +142,12 @@ export default function AnalysisView({ summary }: AnalysisViewProps): React.JSX.
     setStep('Base optical')
     setDetail('Starting')
     void api.compute(endId, startId).catch((err: unknown) => {
+      const message = err instanceof Error ? err.message : 'Compute did not start'
+      if (message.toLowerCase().includes('already running')) {
+        return
+      }
       setRunning(false)
-      setError(err instanceof Error ? err.message : 'Compute did not start')
+      setError(message)
     })
   }
 
@@ -202,7 +208,7 @@ export default function AnalysisView({ summary }: AnalysisViewProps): React.JSX.
         {error && <p className="note">{error}</p>}
         {!change && !running && <p className="note">Start is the base. End is the current state. Compute compares those two.</p>}
         {change?.earlier_label && change.later_label && (
-          <p className="note">{change.earlier_label} is the base. {change.later_label} is current. Net optical water {netText}.</p>
+          <p className="note">{change.earlier_label} is the base. {change.later_label} is current. Net bank change {netText}.</p>
         )}
         {change && (
           <p className="note">Optical scene {change.optical_scene ?? '—'} · Microwave scene {change.microwave_scene ?? '—'}</p>
@@ -212,6 +218,8 @@ export default function AnalysisView({ summary }: AnalysisViewProps): React.JSX.
           <label className="check"><input type="checkbox" checked={showMicrowave} onChange={() => setShowMicrowave((value) => !value)} /> Microwave</label>
           <label className="check"><input type="checkbox" checked={showErosion} onChange={() => setShowErosion((value) => !value)} /> Erosion</label>
           <label className="check"><input type="checkbox" checked={showDeposition} onChange={() => setShowDeposition((value) => !value)} /> Deposition</label>
+          <label className="check"><input type="checkbox" checked={showStartBank} onChange={() => setShowStartBank((value) => !value)} /> Start bank</label>
+          <label className="check"><input type="checkbox" checked={showEndBank} onChange={() => setShowEndBank((value) => !value)} /> End bank</label>
           <label className="check"><input type="checkbox" checked={satellite} onChange={() => setSatellite((value) => !value)} /> Satellite</label>
         </div>
         <div className="readout">
@@ -237,6 +245,7 @@ export default function AnalysisView({ summary }: AnalysisViewProps): React.JSX.
       <div className="stage">
         <MapCanvas
           centerline={change?.centerline ?? null}
+          banks={change?.banks ?? null}
           endpoints={summary.study_area.endpoints}
           footprint={ROI}
           bounds={change?.bounds ?? ROI}
@@ -248,6 +257,8 @@ export default function AnalysisView({ summary }: AnalysisViewProps): React.JSX.
           showLater={showRiver}
           showErosion={showErosion}
           showDeposition={showDeposition}
+          showStartBank={showStartBank}
+          showEndBank={showEndBank}
           satellite={satellite}
           pick={pick}
           focus={focus}
@@ -319,8 +330,14 @@ function FitMask({ bounds, revision }: { bounds: Bounds | null; revision: string
   return null
 }
 
+function bankLines(banks: GeoJSON.FeatureCollection, prefix: string): GeoJSON.FeatureCollection {
+  const features = banks.features.filter((feature) => String(feature.properties?.role ?? '').startsWith(prefix))
+  return { type: 'FeatureCollection', features }
+}
+
 function MapCanvas(props: {
   centerline: GeoJSON.Feature | null | undefined
+  banks: GeoJSON.FeatureCollection | null | undefined
   endpoints: Endpoints
   footprint: Bounds | null
   bounds: Bounds | null
@@ -332,6 +349,8 @@ function MapCanvas(props: {
   showMicrowave: boolean
   showErosion: boolean
   showDeposition: boolean
+  showStartBank: boolean
+  showEndBank: boolean
   satellite: boolean
   pick: { lat: number; lon: number } | null
   focus: { lat: number; lon: number; token: number } | null
@@ -374,16 +393,30 @@ function MapCanvas(props: {
           <ImageOverlay key={`late-${props.revision}`} url={props.laterUrl} bounds={frameOf(frame)} opacity={0.4} interactive={false} />
         )}
         {props.showDeposition && props.depositionUrl && frame && (
-          <ImageOverlay key={`dep-${props.revision}`} url={props.depositionUrl} bounds={frameOf(frame)} opacity={0.55} interactive={false} />
+          <ImageOverlay key={`dep-${props.revision}`} url={props.depositionUrl} bounds={frameOf(frame)} opacity={0.9} interactive={false} />
         )}
         {props.showErosion && props.erosionUrl && frame && (
-          <ImageOverlay key={`ero-${props.revision}`} url={props.erosionUrl} bounds={frameOf(frame)} opacity={0.45} interactive={false} />
+          <ImageOverlay key={`ero-${props.revision}`} url={props.erosionUrl} bounds={frameOf(frame)} opacity={0.9} interactive={false} />
+        )}
+        {props.showStartBank && props.banks && (
+          <GeoJSON
+            key={`banks-start-${props.revision}`}
+            data={bankLines(props.banks, 'start')}
+            style={{ color: '#38bdf8', weight: 2, opacity: 0.95 }}
+          />
+        )}
+        {props.showEndBank && props.banks && (
+          <GeoJSON
+            key={`banks-end-${props.revision}`}
+            data={bankLines(props.banks, 'end')}
+            style={{ color: '#f59e0b', weight: 2, opacity: 1 }}
+          />
         )}
         {axis && (
-          <GeoJSON key={`axis-case-${props.revision}`} data={axis} style={{ color: '#0f172a', weight: 2.5, opacity: 0.8 }} />
+          <GeoJSON key={`axis-case-${props.revision}`} data={axis} style={{ color: '#0f172a', weight: 3, opacity: 0.9 }} />
         )}
         {axis && (
-          <GeoJSON key={`axis-${props.revision}`} data={axis} style={{ color: '#ffffff', weight: 1, opacity: 1 }} />
+          <GeoJSON key={`axis-${props.revision}`} data={axis} style={{ color: '#f8fafc', weight: 1.4, opacity: 1 }} />
         )}
         <CircleMarker center={[upstream.lat, upstream.lon]} radius={5} pathOptions={{ color: '#fff', weight: 2, fillColor: '#38bdf8', fillOpacity: 1 }}>
           <Tooltip direction="left">{upstream.name}</Tooltip>
@@ -399,6 +432,8 @@ function MapCanvas(props: {
       </MapContainer>
       <div className="map-legend">
         <span><i className="swatch centre" /> Centre</span>
+        {props.showStartBank && <span><i className="swatch" style={{ background: '#38bdf8' }} /> Start bank</span>}
+        {props.showEndBank && <span><i className="swatch" style={{ background: '#f59e0b' }} /> End bank</span>}
         <span><i className="swatch water" /> Optical</span>
         <span><i className="swatch microwave" /> Microwave</span>
         <span><i className="swatch erosion" /> Erosion</span>
