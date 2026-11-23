@@ -19,10 +19,20 @@ MICROWAVE_ARCHIVE_START = date(2014, 10, 3)
 ALLOWED_WINDOW_DAYS = (1, 15, 30, 60)
 DEFAULT_WINDOW_DAYS = 15
 MIN_VALID_FRACTION = 0.70  # provisional warning / acceptance setting
-ALGORITHM_VERSION = "envv3"
+ALGORITHM_VERSION = "envv4"
 CLASSIFICATION = {
     "optical": "MNDWI_B3_B11_gt_0",
     "microwave": "VV_lt_-16dB",
+}
+# Fixed baselines for reproducibility — not claimed as universal science standards.
+CLASSIFICATION_NOTE = (
+    "Optical MNDWI>0 and SAR VV<-16 dB are Assam corridor baselines. "
+    "Validate against representative samples before scientific claims; "
+    "adaptive/Otsu thresholds are not used unless explicitly recorded."
+)
+MASKING = {
+    "optical": "SCL_clear_3_8_9_10_11",
+    "microwave": "none",
 }
 
 
@@ -71,6 +81,7 @@ class CompareRequest:
             f"|scale_m={scale_m:g}"
             f"|crs={crs}"
             f"|class={CLASSIFICATION[self.sensor]}"
+            f"|mask={MASKING[self.sensor]}"
         )
 
     def as_dict(self) -> dict:
@@ -171,9 +182,11 @@ def build_compare_request(
         earlier_window = _period(parse_day(earlier_start), parse_day(earlier_end))
         later_window = _period(parse_day(later_start), parse_day(later_end))
         if later_window.start <= earlier_window.end:
-            # Allow adjacent / overlapping seasons only if later ends after earlier ends.
-            if later_window.end <= earlier_window.end:
-                raise ValueError("Later period must end after the earlier period")
+            raise ValueError(
+                "Mode B periods must not overlap: later period must start after "
+                f"the earlier period ends ({earlier_window.end.isoformat()}). "
+                f"Later period starts {later_window.start.isoformat()}."
+            )
         window_days = max(earlier_window.days, later_window.days)
 
     validate_against_archive(earlier_window, sensor)

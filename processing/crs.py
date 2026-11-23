@@ -28,6 +28,12 @@ GEOGRAPHIC_CRS = "EPSG:4326"
 OPERATIONAL_PIXEL_M = 20.0
 LANDSAT_PIXEL_M = 30.0
 
+# Fixed metric analysis grid (live extract, bankline compare).
+ANALYSIS_CRS_WKT = OPERATIONAL_CRS_WKT
+ANALYSIS_CRS = "Assam_Brahmaputra_Albers"
+ANALYSIS_PIXEL_M = 100.0
+GRID_PAD_M = 1_000.0
+
 CHECK_POINTS = {
     "sadiya": (95.67, 27.85),
     "guwahati": (91.7362, 26.1445),

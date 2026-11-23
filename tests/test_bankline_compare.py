@@ -5,23 +5,27 @@ from __future__ import annotations
 import math
 
 import numpy as np
-from rasterio.transform import from_origin
-from shapely.geometry import LineString, box
+from rasterio.transform import from_origin, xy
+from shapely.geometry import LineString, Polygon
 
 from processing.bankline_compare import (
     BanklineQCError,
+    SIDE_CONFIDENCE,
+    bankline_qc_report,
     build_outer_river_envelope,
     calculate_area_statistics,
     calculate_corridor_difference,
     extract_outer_ring,
     find_endpoints,
+    sample_bank_transects,
     split_left_right_banks,
+    transect_coverage_summary,
 )
 from processing.crs import load_crs, to_metres
 
 
-def _grid(width=200, height=80, west=90.0, north=27.0, pixel_deg=0.001):
-    transform = from_origin(west, north, pixel_deg, pixel_deg)
+def _grid(width=200, height=80, pixel_m=100.0):
+    transform = from_origin(0, height * pixel_m, pixel_m, pixel_m)
     return transform, width, height
 
 
@@ -38,14 +42,12 @@ def _corridor(width, height):
 
 
 def _guide_for_box(transform, width, height, row_mid):
-    # Upstream (east) → downstream (west), matching the Assam study orientation.
-    west = transform.c
-    north = transform.f
-    pixel = transform.a
-    lat = north - (row_mid + 0.5) * abs(transform.e)
-    lon_east = west + (width - 5) * pixel
-    lon_west = west + 5 * pixel
-    return LineString([(lon_east, lat), (lon_west, lat)])
+    bundle = load_crs()
+    x_east, y = xy(transform, row_mid, width - 5, offset="center")
+    x_west, _ = xy(transform, row_mid, 5, offset="center")
+    lon_e, lat_e = bundle.to_lonlat.transform(x_east, y)
+    lon_w, lat_w = bundle.to_lonlat.transform(x_west, y)
+    return LineString([(lon_e, lat_e), (lon_w, lat_w)])
 
 
 def test_identical_envelopes_zero_change():
@@ -70,8 +72,7 @@ def test_left_expansion_is_erosion():
     transform, w, h = _grid()
     corridor = _corridor(w, h)
     earlier = _horizontal_river(w, h, 35, 50, 10, 190)
-    later = _horizontal_river(w, h, 30, 50, 10, 190)  # expands "up" / left of east-west flow? 
-    # For east→west guide, left is north (positive lat). Expanding row start upward = left expansion.
+    later = _horizontal_river(w, h, 30, 50, 10, 190)
     valid = np.ones((h, w), dtype=bool)
     erosion, deposition, persistent, common, _, _ = calculate_corridor_difference(
         earlier, later, valid, valid, corridor, min_patch_m2=1.0, pixel_m=100.0
@@ -141,17 +142,16 @@ def test_braided_islands_stay_inside_envelope():
     guide[:] = False
     guide[40, 10:190] = True
     env = build_outer_river_envelope(water, corridor, pixel_m=100.0, close_m=400.0, guide_mask=guide)
-    # Island hole should be filled in the outer envelope.
     assert env[40, 100]
     poly = extract_outer_ring(env, transform)
-    assert poly.interiors == () or all(True for _ in [])  # exterior-only polygon
+    assert poly.interiors == () or all(True for _ in [])
 
 
 def test_isolated_lake_excluded():
     transform, w, h = _grid()
     corridor = _corridor(w, h)
     water = _horizontal_river(w, h, 30, 50, 10, 190)
-    water[5:12, 20:30] = True  # isolated lake far from guide
+    water[5:12, 20:30] = True
     guide = np.zeros((h, w), dtype=bool)
     guide[40, 10:190] = True
     env = build_outer_river_envelope(water, corridor, pixel_m=100.0, close_m=200.0, guide_mask=guide)
@@ -165,7 +165,7 @@ def test_missing_observation_not_change():
     later = _horizontal_river(w, h, 30, 55, 10, 190)
     valid_e = np.ones((h, w), dtype=bool)
     valid_l = np.ones((h, w), dtype=bool)
-    valid_l[50:55, :] = False  # expansion zone unobserved later
+    valid_l[50:55, :] = False
     erosion, deposition, _, common, *_ = calculate_corridor_difference(
         earlier, later, valid_e, valid_l, corridor, min_patch_m2=1.0, pixel_m=100.0
     )
@@ -184,10 +184,11 @@ def test_area_accounting():
     )
     stats = calculate_area_statistics(earlier, later, ero_raw, dep_raw, persistent, common, transform)
     assert abs(stats["net_km2"] - (stats["erosion_km2"] - stats["deposition_km2"])) < 0.5
+    assert abs(stats["pixel_m2"] - 10_000.0) < 1e-6
 
 
 def test_curved_corridor_banklines():
-    transform, w, h = _grid(width=220, height=120, west=91.0, north=26.5)
+    transform, w, h = _grid(width=220, height=120, pixel_m=100.0)
     water = np.zeros((h, w), dtype=bool)
     for col in range(15, 205):
         centre = int(40 + 18 * math.sin((col - 15) / 30.0))
@@ -198,15 +199,13 @@ def test_curved_corridor_banklines():
         centre = int(40 + 18 * math.sin((col - 15) / 30.0))
         guide_mask[centre, col] = True
     env = build_outer_river_envelope(water, corridor, pixel_m=100.0, close_m=250.0, guide_mask=guide_mask)
-    poly_ll = extract_outer_ring(env, transform)
     bundle = load_crs()
-    poly_m = to_metres(poly_ll, bundle)
-    # Build guide from mask centreline samples.
+    poly_m = extract_outer_ring(env, transform)
     coords = []
     for col in range(204, 14, -3):
         centre = int(40 + 18 * math.sin((col - 15) / 30.0))
-        lon = transform.c + (col + 0.5) * transform.a
-        lat = transform.f - (centre + 0.5) * abs(transform.e)
+        x, y = xy(transform, centre, col, offset="center")
+        lon, lat = bundle.to_lonlat.transform(x, y)
         coords.append((lon, lat))
     guide = LineString(coords)
     guide_m = to_metres(guide, bundle)
@@ -214,11 +213,55 @@ def test_curved_corridor_banklines():
     left, right = split_left_right_banks(poly_m, ends, guide_m)
     assert left.length > 5_000
     assert right.length > 5_000
-    # Width variation: distance between banks should vary along chainage.
     widths = []
     for s in np.linspace(0.1, 0.9, 8):
         widths.append(left.interpolate(s, normalized=True).distance(right.interpolate(s, normalized=True)))
     assert max(widths) - min(widths) > 50
+
+
+def test_long_parallel_water_body_not_selected_over_guide_river():
+    """Unrelated long E–W water must lose to the guide-touching main stem."""
+    transform, w, h = _grid(width=220, height=100, pixel_m=100.0)
+    corridor = _corridor(w, h)
+    water = _horizontal_river(w, h, 35, 55, 30, 140)
+    water[8:14, 10:210] = True
+    guide = np.zeros((h, w), dtype=bool)
+    guide[45, 30:140] = True
+    env = build_outer_river_envelope(water, corridor, pixel_m=100.0, close_m=150.0, guide_mask=guide)
+    assert env[8:14, :].sum() == 0, "parallel E–W lake must not dominate the envelope"
+    assert env[35:55, 50:120].mean() > 0.5
+
+
+def test_ambiguous_transect_multi_intersection_not_extremes():
+    """More than two ring hits on a cross-section → ambiguous, no offset extremes."""
+    bundle = load_crs()
+    poly_m = Polygon(
+        [
+            (-20_000, -2_000),
+            (20_000, -2_000),
+            (20_000, -500),
+            (-500, -500),
+            (-500, 500),
+            (20_000, 500),
+            (20_000, 2_000),
+            (-20_000, 2_000),
+            (-20_000, 500),
+            (500, 500),
+            (500, -500),
+            (-20_000, -500),
+        ]
+    )
+    guide_west = bundle.to_lonlat.transform(-18_000, 0)
+    guide_east = bundle.to_lonlat.transform(18_000, 0)
+    guide = LineString([guide_east, guide_west])
+    guide_m = to_metres(guide, bundle)
+    rows = sample_bank_transects(poly_m, poly_m, guide_m, step_m=5_000.0, reach_m=30_000.0)
+    mid = min(rows, key=lambda r: abs(r["chainage_m"] - guide_m.length / 2))
+    assert mid["ambiguous"] is True
+    assert mid["qc_status"] == "ambiguous"
+    assert mid["left_old_offset_m"] is None and mid["right_old_offset_m"] is None
+    summary = transect_coverage_summary(rows)
+    assert summary["ambiguous"] >= 1
 
 
 def test_endpoints_produce_two_banks():
@@ -228,12 +271,39 @@ def test_endpoints_produce_two_banks():
     guide_mask = np.zeros((h, w), dtype=bool)
     guide_mask[40, 10:190] = True
     env = build_outer_river_envelope(water, corridor, pixel_m=100.0, close_m=200.0, guide_mask=guide_mask)
-    poly_ll = extract_outer_ring(env, transform)
+    poly_m = extract_outer_ring(env, transform)
     bundle = load_crs()
-    poly_m = to_metres(poly_ll, bundle)
     guide = _guide_for_box(transform, w, h, 40)
     guide_m = to_metres(guide, bundle)
     ends = find_endpoints(poly_m, guide_m, search_inward_m=3_000.0, step_m=200.0)
     assert set(ends) == {"UL", "UR", "DL", "DR"}
     left, right = split_left_right_banks(poly_m, ends, guide_m)
     assert left.is_simple and right.is_simple
+
+
+def test_bankline_qc_report_keys_and_side_confidence():
+    transform, w, h = _grid()
+    water = _horizontal_river(w, h, 30, 50, 10, 190)
+    corridor = _corridor(w, h)
+    guide_mask = np.zeros((h, w), dtype=bool)
+    guide_mask[40, 10:190] = True
+    env = build_outer_river_envelope(water, corridor, pixel_m=100.0, close_m=200.0, guide_mask=guide_mask)
+    poly_m = extract_outer_ring(env, transform)
+    guide = _guide_for_box(transform, w, h, 40)
+    guide_m = to_metres(guide, load_crs())
+    ends = find_endpoints(poly_m, guide_m, search_inward_m=3_000.0, step_m=200.0)
+    left, right = split_left_right_banks(poly_m, ends, guide_m)
+    qc = bankline_qc_report(left, right, guide_m, poly_m)
+    expected_keys = {
+        "length_km",
+        "is_simple",
+        "max_coordinate_gap_m",
+        "pct_on_expected_side",
+        "median_distance_to_exterior_m",
+    }
+    for side in ("left", "right"):
+        assert expected_keys <= set(qc[side].keys())
+        assert qc[side]["is_simple"] is True
+        assert qc[side]["pct_on_expected_side"] >= 100.0 * SIDE_CONFIDENCE
+        assert qc[side]["length_km"] > 0
+        assert qc[side]["median_distance_to_exterior_m"] < 500.0

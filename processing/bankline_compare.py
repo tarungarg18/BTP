@@ -4,7 +4,8 @@ Method (independent of centreline rays):
 
 1. Clip water to the Brahmaputra search corridor.
 2. Keep the main-stem connected network (guide as search constraint only).
-3. Morphological close + hole fill → outer river-corridor envelope E_t.
+3. Morphological close + hole fill → outer river-corridor envelope E_t; post-close
+   component chosen by guide overlap / chainage scoring (not raw E–W column span).
 4. Exterior ring of E_t → left/right banklines via guide normals and signed side.
 5. Two-date difference on common valid support:
      erosion   = E_later  & ~E_earlier & valid
@@ -40,6 +41,9 @@ DEFAULT_CROSS_REACH_M = 25_000.0
 AREA_TOLERANCE_KM2 = 0.5
 MIN_BANK_LENGTH_M = 50_000.0
 SIDE_CONFIDENCE = 0.55
+GUIDE_BUFFER_M = 4_000.0  # belt for continuity scoring (matches guide_search_mask)
+MIN_GUIDE_OVERLAP_FRAC = 0.03  # reject components with negligible guide buffer overlap
+TRANSECT_AXIS_TOL_M = 1.0
 
 
 class BanklineQCError(RuntimeError):
@@ -78,6 +82,11 @@ def _pixel_m(transform) -> float:
     return float(abs(transform.a))
 
 
+def _projected_grid(transform) -> bool:
+    """True when the raster affine is in projected metres (not geographic degrees)."""
+    return abs(float(transform.a)) >= 1.0
+
+
 def build_outer_river_envelope(
     water: np.ndarray,
     corridor: np.ndarray,
@@ -85,6 +94,7 @@ def build_outer_river_envelope(
     pixel_m: float,
     close_m: float = DEFAULT_CLOSE_M,
     guide_mask: np.ndarray | None = None,
+    valid: np.ndarray | None = None,
 ) -> np.ndarray:
     """Corridor-clipped main-stem envelope with bars filled (paper-style hole fill)."""
     from scipy import ndimage as ndi
@@ -94,47 +104,32 @@ def build_outer_river_envelope(
     if not clipped.any():
         raise BanklineQCError("No water inside the Brahmaputra corridor for this date.")
 
-    # Keep every water component that touches the guide search belt (reject lakes).
     labels, count = ndi.label(clipped)
     if count == 0:
         raise BanklineQCError("Water labelling failed inside the corridor.")
-    if guide_mask is not None:
-        touch = np.unique(labels[np.asarray(guide_mask, dtype=bool) & (labels > 0)])
-        keep = np.zeros(count + 1, dtype=bool)
-        keep[touch] = True
-        network = keep[labels]
-        if int(network.sum()) < 500:
-            network = _longest_span_component(labels, count)
-    else:
-        network = _longest_span_component(labels, count)
-
+    corridor_b = np.asarray(corridor, dtype=bool)
+    valid_b = np.asarray(valid, dtype=bool) if valid is not None else corridor_b
+    # Pre-close: score guide continuity (do not keep every guide-touching lake/tributary).
+    network = _select_postclose_component(
+        labels, count, guide_mask, corridor_b, valid_b, pixel_m=pixel_m
+    )
     if not network.any():
         raise BanklineQCError("Could not identify the main-stem channel network.")
 
     # Close gaps between braids / bars, then fill internal islands. Stay inside corridor.
     radius = max(1, int(round(close_m / max(pixel_m, 1.0))))
     closed = binary_closing(network, footprint=disk(radius))
-    closed &= np.asarray(corridor, dtype=bool)
+    closed &= corridor_b
     filled = ndi.binary_fill_holes(closed)
-    filled &= np.asarray(corridor, dtype=bool)
+    filled &= corridor_b
 
-    # After bridging, keep the single longest east–west body (the main stem).
+    # After bridging, re-score — never raw east–west column span.
     labels2, count2 = ndi.label(filled)
     if count2 == 0:
         raise BanklineQCError("Envelope collapsed after morphological closing.")
-    envelope = _longest_span_component(labels2, count2)
-    if guide_mask is not None and not (envelope & np.asarray(guide_mask, dtype=bool)).any():
-        # Prefer a long body that still touches the guide if the absolute longest does not.
-        touch2 = np.unique(labels2[np.asarray(guide_mask, dtype=bool) & (labels2 > 0)])
-        if touch2.size:
-            areas = np.bincount(labels2.ravel())
-            areas[0] = 0
-            spans = np.zeros(count2 + 1, dtype=np.int32)
-            for label in touch2:
-                cols = np.flatnonzero((labels2 == label).any(axis=0))
-                spans[int(label)] = int(cols[-1] - cols[0]) if cols.size else 0
-            best = int(touch2[np.argmax(spans[touch2])])
-            envelope = labels2 == best
+    envelope = _select_postclose_component(
+        labels2, count2, guide_mask, corridor_b, valid_b, pixel_m=pixel_m
+    )
 
     # Plausibility: envelope must be a continuous along-river body, not a local pond.
     cols = np.flatnonzero(envelope.any(axis=0))
@@ -149,6 +144,7 @@ def build_outer_river_envelope(
 
 
 def _longest_span_component(labels: np.ndarray, count: int) -> np.ndarray:
+    """Fallback when guide is unavailable (pre-close network seeding only)."""
     best_id = 0
     best_span = -1
     best_area = -1
@@ -163,8 +159,82 @@ def _longest_span_component(labels: np.ndarray, count: int) -> np.ndarray:
     return labels == best_id
 
 
+def _select_postclose_component(
+    labels: np.ndarray,
+    count: int,
+    guide_mask: np.ndarray | None,
+    corridor: np.ndarray,
+    valid: np.ndarray,
+    *,
+    pixel_m: float,
+) -> np.ndarray:
+    """Pick the closed component best aligned with the guide (post-close envelope)."""
+    from scipy import ndimage as ndi
+
+    guide = np.asarray(guide_mask, dtype=bool) if guide_mask is not None else None
+    if guide is not None and not guide.any():
+        guide = None
+
+    buf_radius = max(1, int(round(GUIDE_BUFFER_M / max(pixel_m, 1.0))))
+    guide_buf = None
+    guide_pixels = None
+    if guide is not None:
+        guide_buf = ndi.binary_dilation(guide, iterations=buf_radius) & corridor
+        guide_pixels = guide & corridor
+
+    candidates: list[tuple[float, int]] = []
+    for label in range(1, count + 1):
+        comp = labels == label
+        if not comp.any() or not (comp & corridor).any():
+            continue
+        if guide is not None and not (comp & guide).any():
+            continue
+
+        valid_frac = float((comp & valid).sum()) / max(int(comp.sum()), 1)
+
+        if guide is not None and guide_buf is not None and guide_pixels is not None:
+            continuity = float((comp & guide_buf).sum()) / max(int(guide_buf.sum()), 1)
+            along_guide = float((comp & guide_pixels).sum()) / max(int(guide_pixels.sum()), 1)
+            guide_cols = np.flatnonzero(guide_pixels.any(axis=0))
+            if guide_cols.size:
+                chainage_cols = sum(1 for c in guide_cols if comp[:, c].any())
+                chainage_m = chainage_cols * pixel_m
+            else:
+                chainage_frac = 0.0
+                chainage_m = 0.0
+            if continuity < MIN_GUIDE_OVERLAP_FRAC:
+                continue
+        else:
+            continuity = 1.0
+            along_guide = 1.0
+            overlap_cols = np.flatnonzero((comp & corridor).any(axis=0))
+            chainage_frac = 1.0 if overlap_cols.size else 0.0
+            chainage_m = float(overlap_cols.size) * pixel_m if overlap_cols.size else 0.0
+
+        # Weighted score: guide continuity, valid observations, chainage along guide — not image columns.
+        norm_chain = chainage_m / max(chainage_m, 50_000.0) if chainage_m > 0 else 0.0
+        score = (
+            0.40 * continuity
+            + 0.25 * along_guide
+            + 0.25 * min(1.0, norm_chain)
+            + 0.10 * valid_frac
+        )
+        candidates.append((score, label))
+
+    if not candidates:
+        if guide is not None:
+            raise BanklineQCError(
+                "No closed river component with sufficient guide overlap; "
+                "river envelope may be partial or incomplete."
+            )
+        return _longest_span_component(labels, count)
+
+    best_label = max(candidates, key=lambda item: item[0])[1]
+    return labels == best_label
+
+
 def extract_outer_ring(envelope: np.ndarray, transform) -> Polygon:
-    """Exterior ring of the filled envelope as a projected-ready lon/lat polygon."""
+    """Exterior ring in the same CRS as transform (metres on the analysis grid)."""
     from rasterio.features import shapes
 
     mask = np.asarray(envelope, dtype=np.uint8)
@@ -458,6 +528,54 @@ def _orient_upstream_to_downstream(line: LineString, upstream: tuple[float, floa
     return LineString(list(line.coords)[::-1])
 
 
+def bankline_qc_report(
+    left: LineString,
+    right: LineString,
+    guide_m: LineString,
+    poly_m: Polygon,
+) -> dict:
+    """Per-bank geometry QC against guide side and envelope exterior (metres)."""
+
+    def _one_bank(line: LineString, *, expect_left: bool) -> dict:
+        if line.is_empty:
+            return {
+                "length_km": 0.0,
+                "is_simple": False,
+                "max_coordinate_gap_m": 0.0,
+                "pct_on_expected_side": 0.0,
+                "median_distance_to_exterior_m": None,
+            }
+        exterior = poly_m.exterior
+        coords = list(line.coords)
+        max_gap = 0.0
+        for i in range(1, len(coords)):
+            leap = math.hypot(coords[i][0] - coords[i - 1][0], coords[i][1] - coords[i - 1][1])
+            max_gap = max(max_gap, leap)
+        samples = max(20, int(line.length / 2000.0))
+        on_expected = 0
+        dists: list[float] = []
+        for i in range(samples + 1):
+            pt = line.interpolate(i / samples, normalized=True)
+            side = _signed_side((pt.x, pt.y), guide_m)
+            if expect_left:
+                on_expected += int(side > 0)
+            else:
+                on_expected += int(side < 0)
+            dists.append(float(pt.distance(exterior)))
+        return {
+            "length_km": round(line.length / 1000.0, 3),
+            "is_simple": bool(line.is_simple),
+            "max_coordinate_gap_m": round(max_gap, 1),
+            "pct_on_expected_side": round(100.0 * on_expected / (samples + 1), 2),
+            "median_distance_to_exterior_m": round(float(np.median(dists)), 2),
+        }
+
+    return {
+        "left": _one_bank(left, expect_left=True),
+        "right": _one_bank(right, expect_left=False),
+    }
+
+
 def validate_bankline_geometry(left: LineString, right: LineString, guide_m: LineString) -> None:
     min_len = max(5_000.0, 0.25 * float(guide_m.length))
     if left.length < min_len or right.length < min_len:
@@ -491,10 +609,11 @@ def sample_bank_transects(
     """Per-chainage outer left/right offsets for both dates.
 
     QC statuses (no gap filling / no invented banks):
-      both_ok       – both dates have left+right intersections
+      both_ok       – both dates have unambiguous left+right intersections
       earlier_only  – only earlier envelope intersects
       later_only    – only later envelope intersects
       neither       – neither envelope intersects at this chainage
+      ambiguous     – cross-section has extra/unclear ring intersections
     """
     rows: list[dict] = []
     ring_old = _densify_ring(earlier_poly_m)
@@ -515,20 +634,28 @@ def sample_bank_transects(
         uL_old = uR_old = uL_new = uR_new = None
         dL = dR = None
         left_class = right_class = "nodata"
-        if old is not None and new is not None:
+        ambiguous = bool(
+            (old is not None and old.ambiguous)
+            or (new is not None and new.ambiguous)
+        )
+        old_ok = old is not None and not old.ambiguous and old.left_u is not None
+        new_ok = new is not None and not new.ambiguous and new.left_u is not None
+        if ambiguous:
+            qc = "ambiguous"
+        elif old_ok and new_ok:
             qc = "both_ok"
-            uL_old, uR_old = old
-            uL_new, uR_new = new
+            uL_old, uR_old = old.left_u, old.right_u
+            uL_new, uR_new = new.left_u, new.right_u
             dL = uL_new - uL_old
             dR = uR_old - uR_new
             left_class = _shift_class(dL)
             right_class = _shift_class(dR)
-        elif old is not None:
+        elif old_ok:
             qc = "earlier_only"
-            uL_old, uR_old = old
-        elif new is not None:
+            uL_old, uR_old = old.left_u, old.right_u
+        elif new_ok:
             qc = "later_only"
-            uL_new, uR_new = new
+            uL_new, uR_new = new.left_u, new.right_u
         else:
             qc = "neither"
         rows.append(
@@ -545,6 +672,7 @@ def sample_bank_transects(
                 "left_class": left_class,
                 "right_class": right_class,
                 "qc_status": qc,
+                "ambiguous": ambiguous,
             }
         )
     return rows
@@ -557,6 +685,7 @@ def transect_coverage_summary(rows: list[dict]) -> dict:
     earlier_only = sum(1 for r in rows if r["qc_status"] == "earlier_only")
     later_only = sum(1 for r in rows if r["qc_status"] == "later_only")
     neither = sum(1 for r in rows if r["qc_status"] == "neither")
+    ambiguous = sum(1 for r in rows if r.get("ambiguous"))
     left_ok = sum(1 for r in both if r["left_old_offset_m"] is not None and r["left_new_offset_m"] is not None)
     right_ok = sum(1 for r in both if r["right_old_offset_m"] is not None and r["right_new_offset_m"] is not None)
     first = both[0]["chainage_m"] if both else None
@@ -587,6 +716,7 @@ def transect_coverage_summary(rows: list[dict]) -> dict:
         "earlier_only": earlier_only,
         "later_only": later_only,
         "neither": neither,
+        "ambiguous": ambiguous,
         "left_bank_ok": left_ok,
         "right_bank_ok": right_ok,
         "pct_of_guide": round(100.0 * len(both) / max(total, 1), 2),
@@ -602,16 +732,38 @@ def transect_coverage_summary(rows: list[dict]) -> dict:
     }
 
 
-def _outer_offsets(cross: LineString, ring: LineString, origin: np.ndarray, normal: np.ndarray):
+@dataclass(frozen=True)
+class _TransectOffsets:
+    left_u: float | None
+    right_u: float | None
+    ambiguous: bool = False
+
+
+def _outer_offsets(
+    cross: LineString, ring: LineString, origin: np.ndarray, normal: np.ndarray
+) -> _TransectOffsets | None:
+    """Signed offsets to the exterior ring; one hit per guide-normal side or ambiguous."""
     hit = cross.intersection(ring)
     points = _points_from(hit)
     if len(points) < 2:
         return None
-    us = []
+
+    tol = TRANSECT_AXIS_TOL_M
+    positive: list[float] = []
+    negative: list[float] = []
     for px, py in points:
-        u = (px - origin[0]) * normal[0] + (py - origin[1]) * normal[1]
-        us.append(u)
-    return max(us), min(us)
+        u = float((px - origin[0]) * normal[0] + (py - origin[1]) * normal[1])
+        if u > tol:
+            positive.append(u)
+        elif u < -tol:
+            negative.append(u)
+        else:
+            return _TransectOffsets(None, None, ambiguous=True)
+
+    if len(points) > 2 or len(positive) != 1 or len(negative) != 1:
+        return _TransectOffsets(None, None, ambiguous=True)
+
+    return _TransectOffsets(left_u=positive[0], right_u=negative[0], ambiguous=False)
 
 
 def _shift_class(delta: float | None) -> str:
@@ -697,6 +849,8 @@ def polygon_area_km2(mask: np.ndarray, transform) -> float:
     if not polys:
         return 0.0
     merged = unary_union(polys)
+    if _projected_grid(transform):
+        return float(merged.area) / 1_000_000.0
     projected = to_metres(merged, bundle)
     return float(projected.area) / 1_000_000.0
 
@@ -750,14 +904,17 @@ def calculate_area_statistics(
             f"Raster area accounting failed: later−earlier={net_pixels} px "
             f"but erosion−deposition={diff_pixels} px."
         )
-    # Equal-area conversion: mean Assam-Albers area of a pixel near corridor mid-lat.
     height, width = e0.shape
-    sample = [
-        _pixel_area_m2(transform, height // 2, width // 4),
-        _pixel_area_m2(transform, height // 2, width // 2),
-        _pixel_area_m2(transform, height // 2, 3 * width // 4),
-    ]
-    pixel_m2 = sum(sample) / len(sample)
+    pixel_m = _pixel_m(transform)
+    if _projected_grid(transform):
+        pixel_m2 = pixel_m * pixel_m
+    else:
+        sample = [
+            _pixel_area_m2(transform, height // 2, width // 4),
+            _pixel_area_m2(transform, height // 2, width // 2),
+            _pixel_area_m2(transform, height // 2, 3 * width // 4),
+        ]
+        pixel_m2 = sum(sample) / len(sample)
     pixel_km2 = pixel_m2 / 1_000_000.0
     earlier_km2 = float(e0.sum()) * pixel_km2
     later_km2 = float(e1.sum()) * pixel_km2
@@ -774,9 +931,11 @@ def calculate_area_statistics(
             f"but later−earlier={net_from_areas:.3f} km² "
             f"(tolerance {tolerance_km2} km²)."
         )
-    # Independent vector check (Assam Albers polygonization) — informational.
-    albers_earlier = polygon_area_km2(e0, transform)
-    albers_later = polygon_area_km2(e1, transform)
+    # Independent vector check on the same CRS as the raster transform.
+    vector_earlier = polygon_area_km2(e0, transform)
+    vector_later = polygon_area_km2(e1, transform)
+    raster_vector_gap_earlier = abs(earlier_km2 - vector_earlier)
+    raster_vector_gap_later = abs(later_km2 - vector_later)
     return {
         "earlier_km2": round(earlier_km2, 3),
         "later_km2": round(later_km2, 3),
@@ -792,9 +951,20 @@ def calculate_area_statistics(
         "later_valid_pixels": int(e1.sum()),
         "earlier_full_km2": round(earlier_full_km2, 3),
         "later_full_km2": round(later_full_km2, 3),
-        "albers_earlier_valid_km2": round(albers_earlier, 3),
-        "albers_later_valid_km2": round(albers_later, 3),
-        "area_source": "envelope & common_valid on shared EPSG:4326 grid; m² via Assam Albers pixel area",
+        "albers_earlier_valid_km2": round(vector_earlier, 3),
+        "albers_later_valid_km2": round(vector_later, 3),
+        "raster_vector_gap_earlier_km2": round(raster_vector_gap_earlier, 3),
+        "raster_vector_gap_later_km2": round(raster_vector_gap_later, 3),
+        "raster_vector_ok": (
+            raster_vector_gap_earlier <= tolerance_km2 and raster_vector_gap_later <= tolerance_km2
+        ),
+        "area_tolerance_km2": tolerance_km2,
+        "area_source": (
+            "envelope & common_valid on shared Assam Albers 100 m grid; "
+            f"raster km² = pixel_count × {pixel_m:.0f}² m²; "
+            "vector polygonization independent QC "
+            f"(tolerance {tolerance_km2} km²)"
+        ),
     }
 
 
@@ -853,14 +1023,20 @@ def build_date_corridor(
     close_m: float = DEFAULT_CLOSE_M,
 ) -> DateCorridor:
     """Full per-date envelope + banklines."""
-    pixel_m = abs(float(transform.a)) * 111_320.0 * math.cos(math.radians(27.0))
-    # Geographic transform is in degrees; approximate metre size at Assam latitude.
-    envelope = build_outer_river_envelope(
-        water, corridor, pixel_m=pixel_m, close_m=close_m, guide_mask=guide_mask
+    pixel_m = _pixel_m(transform) if _projected_grid(transform) else (
+        abs(float(transform.a)) * 111_320.0 * math.cos(math.radians(27.0))
     )
-    poly_ll = extract_outer_ring(envelope, transform)
+    envelope = build_outer_river_envelope(
+        water,
+        corridor,
+        pixel_m=pixel_m,
+        close_m=close_m,
+        guide_mask=guide_mask,
+        valid=valid,
+    )
+    poly_grid = extract_outer_ring(envelope, transform)
     bundle, guide_m = _guide_frame(guide_lonlat)
-    poly_m = to_metres(poly_ll, bundle)
+    poly_m = poly_grid if _projected_grid(transform) else to_metres(poly_grid, bundle)
     if not isinstance(poly_m, Polygon):
         raise BanklineQCError("Projected envelope is not a polygon.")
     endpoints = find_endpoints(poly_m, guide_m)
@@ -890,7 +1066,9 @@ def compare_corridors(
     transect_csv: Path | None = None,
 ) -> dict:
     """Two-date envelope difference, bank GeoJSON, optional transect CSV."""
-    pixel_m = abs(float(transform.a)) * 111_320.0 * math.cos(math.radians(27.0))
+    pixel_m = _pixel_m(transform) if _projected_grid(transform) else (
+        abs(float(transform.a)) * 111_320.0 * math.cos(math.radians(27.0))
+    )
     erosion, deposition, persistent, valid, erosion_raw, deposition_raw = calculate_corridor_difference(
         earlier.envelope,
         later.envelope,
@@ -929,6 +1107,9 @@ def compare_corridors(
     if transect_csv is not None:
         write_transect_csv(rows, transect_csv)
 
+    earlier_bl_qc = bankline_qc_report(earlier.left, earlier.right, guide_m, earlier.polygon)
+    later_bl_qc = bankline_qc_report(later.left, later.right, guide_m, later.polygon)
+
     aoi = np.asarray(aoi, dtype=bool)
     earlier_obs = np.asarray(earlier.valid, dtype=bool) & aoi
     later_obs = np.asarray(later.valid, dtype=bool) & aoi
@@ -961,6 +1142,12 @@ def compare_corridors(
         "erosion_raw": erosion_raw,
         "deposition_raw": deposition_raw,
         "banks": banks,
+        "bankline_qc": {
+            "earlier_left": earlier_bl_qc["left"],
+            "earlier_right": earlier_bl_qc["right"],
+            "later_left": later_bl_qc["left"],
+            "later_right": later_bl_qc["right"],
+        },
         "envelopes": {
             "earlier": polygon_feature(earlier.polygon, "earlier_envelope", bundle),
             "later": polygon_feature(later.polygon, "later_envelope", bundle),
@@ -994,5 +1181,8 @@ def guide_search_mask(height: int, width: int, transform, half_width_m: float = 
     from .guide import load_guide_lonlat
 
     bundle = load_crs()
-    belt = to_lonlat(to_metres(load_guide_lonlat(), bundle).buffer(half_width_m), bundle)
+    if _projected_grid(transform):
+        belt = to_metres(load_guide_lonlat(), bundle).buffer(half_width_m)
+    else:
+        belt = to_lonlat(to_metres(load_guide_lonlat(), bundle).buffer(half_width_m), bundle)
     return rasterize([(belt, 1)], out_shape=(height, width), transform=transform, fill=0, dtype="uint8").astype(bool)

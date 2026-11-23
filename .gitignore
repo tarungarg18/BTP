@@ -17,16 +17,3 @@ extra/
 drive-download-*/
 *.tif
 .venv
-
-.pytest_cache/
-reports/qc/*.tif
-reports/qc/*.png
-reports/qc/*.npz
-*.docx
-*.ipynb
-.env
-**/credentials*.json
-**/ee-*.json
-
-reports/qc/*.geojson
-reports/qc/*.csv

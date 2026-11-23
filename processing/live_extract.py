@@ -21,10 +21,11 @@ from pathlib import Path
 import numpy as np
 import rasterio
 from rasterio.io import MemoryFile
-from rasterio.transform import from_origin
+from rasterio.transform import Affine, from_origin
 from rasterio.warp import Resampling, reproject
 
 from .catalog import OVERLAY_DIR, fmt_area
+from .crs import ANALYSIS_CRS, ANALYSIS_CRS_WKT, GRID_PAD_M, load_crs
 from .gee_init import require_ee
 from .inspect import _pixel_rc, _zone
 from .watermask import (
@@ -40,13 +41,11 @@ ROOT = Path(__file__).resolve().parents[1]
 LIVE_DIR = ROOT / "data" / "live"
 WINDOW_DAYS = 15  # default Mode A composite length; overridable via CompareRequest
 SCALE_M = 100
-PIXEL_DEG = 100 / 111_320.0
 PROJECT = "community-hero-5c501"
 ROI = (89.5, 25.5, 96.0, 28.5)
 NDWI_THRESHOLD = 0.0
 CLOUD_PERCENT = 90
 VV_DB = -16.0
-ANALYSIS_CRS = "EPSG:4326"
 _LOCK = threading.Lock()
 _INFLIGHT: dict[str, threading.Event] = {}
 _FAILED: dict[str, BaseException] = {}
@@ -127,26 +126,46 @@ def _label(start: date, end_exclusive: date) -> str:
 
 
 def _cache_path(start: date, end_exclusive: date, sensor: str) -> Path:
-    return LIVE_DIR / f"gee6-{sensor}_{_key(start, end_exclusive)}.npz"
+    return LIVE_DIR / f"gee7-{sensor}_{_key(start, end_exclusive)}.npz"
 
 
 def _overlay_name(start: date, end_exclusive: date, kind: str, sensor: str = "optical") -> str:
     return f"{sensor}-{_key(start, end_exclusive)}-{kind}.png"
 
 
+def _grid_affine(grid: dict) -> Affine:
+    return Affine(*grid["transform"])
+
+
 def _base_grid() -> tuple[rasterio.Affine, int, int, dict]:
+    """Fixed 100 m Assam Albers grid over the Brahmaputra ROI."""
     west, south, east, north = ROI
-    width = int(round((east - west) / PIXEL_DEG))
-    height = int(round((north - south) / PIXEL_DEG))
-    transform = from_origin(west, north, PIXEL_DEG, PIXEL_DEG)
-    mid = math.radians((south + north) / 2.0)
-    metres_x = PIXEL_DEG * 111_320.0 * math.cos(mid)
-    metres_y = PIXEL_DEG * 110_540.0
+    bundle = load_crs()
+    corner_lons = (west, west, east, east)
+    corner_lats = (south, north, south, north)
+    xs, ys = bundle.to_metre.transform(corner_lons, corner_lats)
+    x_min = min(xs) - GRID_PAD_M
+    x_max = max(xs) + GRID_PAD_M
+    y_min = min(ys) - GRID_PAD_M
+    y_max = max(ys) + GRID_PAD_M
+    width = int(math.ceil((x_max - x_min) / SCALE_M))
+    height = int(math.ceil((y_max - y_min) / SCALE_M))
+    transform = from_origin(x_min, y_max, SCALE_M, SCALE_M)
+    pixel_m2 = SCALE_M * SCALE_M
     grid = {
         "bounds": {"west": west, "south": south, "east": east, "north": north},
+        "bounds_m": {
+            "x_min": x_min,
+            "y_min": y_min,
+            "x_max": x_max,
+            "y_max": y_max,
+        },
         "width": width,
         "height": height,
-        "pixel_km2": (metres_x * metres_y) / 1_000_000.0,
+        "pixel_m": SCALE_M,
+        "pixel_km2": pixel_m2 / 1_000_000.0,
+        "crs": ANALYSIS_CRS,
+        "transform": [transform.a, transform.b, transform.c, transform.d, transform.e, transform.f],
     }
     return transform, width, height, grid
 
@@ -154,11 +173,11 @@ def _base_grid() -> tuple[rasterio.Affine, int, int, dict]:
 def _river_belt(height: int, width: int, transform, metres: float = 20_000) -> np.ndarray:
     from rasterio.features import rasterize
 
-    from .crs import load_crs, to_lonlat, to_metres
+    from .crs import load_crs, to_metres
     from .guide import load_guide_lonlat
 
     bundle = load_crs()
-    belt = to_lonlat(to_metres(load_guide_lonlat(), bundle).buffer(metres), bundle)
+    belt = to_metres(load_guide_lonlat(), bundle).buffer(metres)
     painted = rasterize([(belt, 1)], out_shape=(height, width), transform=transform, fill=0, dtype="uint8")
     return painted.astype(bool)
 
@@ -268,7 +287,7 @@ def _on_grid(blob: bytes) -> tuple[np.ndarray, np.ndarray, dict]:
             src_transform=source.transform,
             src_crs=source.crs,
             dst_transform=transform,
-            dst_crs="EPSG:4326",
+            dst_crs=ANALYSIS_CRS_WKT,
             resampling=Resampling.nearest,
         )
         reproject(
@@ -277,7 +296,7 @@ def _on_grid(blob: bytes) -> tuple[np.ndarray, np.ndarray, dict]:
             src_transform=source.transform,
             src_crs=source.crs,
             dst_transform=transform,
-            dst_crs="EPSG:4326",
+            dst_crs=ANALYSIS_CRS_WKT,
             resampling=Resampling.nearest,
         )
     return water.astype(bool), observed.astype(bool), grid
@@ -425,10 +444,12 @@ def _river_axis(score: np.ndarray, grid: dict):
 
     xs = centre[:, 0][:, None] + normal[:, 0][:, None] * offsets[None, :]
     ys = centre[:, 1][:, None] + normal[:, 1][:, None] * offsets[None, :]
-    lon, lat = bundle.to_lonlat.transform(xs.ravel(), ys.ravel())
-    bounds = grid["bounds"]
-    cols = np.floor((np.asarray(lon) - bounds["west"]) / ((bounds["east"] - bounds["west"]) / grid["width"])).astype(int)
-    rows = np.floor((bounds["north"] - np.asarray(lat)) / ((bounds["north"] - bounds["south"]) / grid["height"])).astype(int)
+    from rasterio.transform import rowcol
+
+    transform = _grid_affine(grid)
+    cols, rows = rowcol(transform, xs.ravel(), ys.ravel())
+    cols = np.floor(cols).astype(int)
+    rows = np.floor(rows).astype(int)
     inside = (rows >= 0) & (rows < grid["height"]) & (cols >= 0) & (cols < grid["width"])
     values = np.zeros(rows.size, dtype=np.float32)
     values[inside] = score[rows[inside], cols[inside]]
@@ -591,8 +612,13 @@ def _belt(line_m, bundle, shape: tuple[int, int]) -> np.ndarray:
     from .crs import to_lonlat
 
     transform, _width, _height, _grid = _base_grid()
-    polygon = to_lonlat(line_m.buffer(BELT_HALF_M), bundle)
-    return rasterize([(polygon, 1)], out_shape=shape, transform=transform, fill=0, dtype="uint8").astype(bool)
+    return rasterize(
+        [(line_m.buffer(BELT_HALF_M), 1)],
+        out_shape=shape,
+        transform=transform,
+        fill=0,
+        dtype="uint8",
+    ).astype(bool)
 
 
 def _keep(mask: np.ndarray, pixel_km2: float, area_km2: float) -> np.ndarray:
@@ -728,6 +754,8 @@ def extract_window(start: date, end_exclusive: date, sensor: str = "optical", st
             shape=np.array(water.shape, dtype=np.int32),
             pixel_km2=np.array([grid["pixel_km2"]], dtype=np.float64),
             bounds=np.array([grid["bounds"]["west"], grid["bounds"]["south"], grid["bounds"]["east"], grid["bounds"]["north"]]),
+            transform=np.array(grid["transform"], dtype=np.float64),
+            crs=np.array([grid["crs"]]),
         )
         meta_path.write_text(json.dumps(meta), encoding="utf-8")
         _write_tif(path.with_suffix(".tif"), water, observed, grid)
@@ -753,13 +781,30 @@ def _load(path: Path) -> tuple[np.ndarray, np.ndarray, dict]:
             "height": shape[0],
             "pixel_km2": float(data["pixel_km2"][0]),
         }
+        if "transform" in data:
+            grid["transform"] = [float(v) for v in data["transform"]]
+            grid["crs"] = str(data["crs"][0])
+            grid["pixel_m"] = float(grid["transform"][0])
+            x_min = float(grid["transform"][2])
+            y_max = float(grid["transform"][5])
+            x_max = x_min + shape[1] * abs(grid["transform"][0])
+            y_min = y_max - shape[0] * abs(grid["transform"][4])
+            grid["bounds_m"] = {
+                "x_min": x_min,
+                "y_min": y_min,
+                "x_max": x_max,
+                "y_max": y_max,
+            }
+        else:
+            # Legacy geographic cache — rebuild metric grid metadata from live _base_grid().
+            _, _, _, fresh = _base_grid()
+            grid.update(fresh)
     return water, observed, grid
 
 
 def _write_tif(path: Path, water: np.ndarray, observed: np.ndarray, grid: dict) -> None:
-    bounds = grid["bounds"]
     height, width = water.shape
-    transform = rasterio.transform.from_bounds(bounds["west"], bounds["south"], bounds["east"], bounds["north"], width, height)
+    transform = _grid_affine(grid)
     band = np.where(water, 1, np.where(observed, 0, 255)).astype(np.uint8)
     path.parent.mkdir(parents=True, exist_ok=True)
     with rasterio.open(
@@ -770,7 +815,7 @@ def _write_tif(path: Path, water: np.ndarray, observed: np.ndarray, grid: dict) 
         width=width,
         count=1,
         dtype="uint8",
-        crs="EPSG:4326",
+        crs=ANALYSIS_CRS_WKT,
         transform=transform,
         nodata=255,
         compress="lzw",
@@ -812,17 +857,21 @@ def _main_body(water: np.ndarray) -> np.ndarray:
 
 
 def _rc_of(lon: float, lat: float, grid: dict) -> tuple[float, float]:
-    bounds = grid["bounds"]
-    col = (lon - bounds["west"]) / ((bounds["east"] - bounds["west"]) / grid["width"])
-    row = (bounds["north"] - lat) / ((bounds["north"] - bounds["south"]) / grid["height"])
-    return row, col
+    from rasterio.transform import rowcol
+
+    bundle = load_crs()
+    x, y = bundle.to_metre.transform(lon, lat)
+    row, col = rowcol(_grid_affine(grid), x, y)
+    return float(row), float(col)
 
 
 def _lonlat_of(row: float, col: float, grid: dict) -> tuple[float, float]:
-    bounds = grid["bounds"]
-    lon = bounds["west"] + col * ((bounds["east"] - bounds["west"]) / grid["width"])
-    lat = bounds["north"] - row * ((bounds["north"] - bounds["south"]) / grid["height"])
-    return lon, lat
+    from rasterio.transform import xy
+
+    bundle = load_crs()
+    x, y = xy(_grid_affine(grid), row, col, offset="center")
+    lon, lat = bundle.to_lonlat.transform(x, y)
+    return float(lon), float(lat)
 
 
 def _bank_lines(envelope: np.ndarray, grid: dict, role: str) -> list[dict]:
@@ -1332,8 +1381,7 @@ def _ranked_patches(mask: np.ndarray, grid: dict, limit: int = 25) -> tuple[list
         area = round(float(areas[label]) * float(grid["pixel_km2"]), 2)
         if area < 0.1:
             continue
-        lat = float(grid["bounds"]["north"] - (ys.mean() + 0.5) * ((grid["bounds"]["north"] - grid["bounds"]["south"]) / grid["height"]))
-        lon = float(grid["bounds"]["west"] + (xs.mean() + 0.5) * ((grid["bounds"]["east"] - grid["bounds"]["west"]) / grid["width"]))
+        lon, lat = _lonlat_of(float(ys.mean()), float(xs.mean()), grid)
         rows.append(
             {
                 "rank": len(rows) + 1,
@@ -1780,6 +1828,80 @@ def roi_bounds() -> dict:
     return {"west": west, "south": south, "east": east, "north": north}
 
 
+def _corridor_observed_fraction(start: date, end_exclusive: date, sensor: str) -> float | None:
+    """Observed pixels / river-belt pixels from an on-disk gee7 cache, if present."""
+    cached = _cached(start, end_exclusive, sensor)
+    if cached is None:
+        return None
+    transform, _width, height, _grid = _base_grid()
+    width = cached["water"].shape[1]
+    corridor = _river_belt(height, width, transform, 20_000)
+    observed_in_corridor = cached["observed"] & corridor
+    denom = int(corridor.sum())
+    if denom == 0:
+        return None
+    return float(observed_in_corridor.sum()) / denom
+
+
+def _preflight_corridor_coverage(request) -> dict:
+    """Scene count ≠ corridor coverage; use cached masks when available (no EE download)."""
+    from .date_options import CLASSIFICATION, MASKING
+
+    note = (
+        "Scene counts show catalogue availability only; they do not equal usable "
+        "corridor coverage after cloud/shadow masking and period compositing."
+    )
+    e_start, e_end = request.earlier.start, request.earlier.end_exclusive
+    l_start, l_end = request.later.start, request.later.end_exclusive
+    sensor = request.sensor
+    earlier_frac = _corridor_observed_fraction(e_start, e_end, sensor)
+    later_frac = _corridor_observed_fraction(l_start, l_end, sensor)
+    base = {
+        "corridor_coverage_note": note,
+        "classification": CLASSIFICATION[sensor],
+        "masking": MASKING[sensor],
+    }
+    if earlier_frac is None and later_frac is None:
+        return {
+            **base,
+            "coverage_status": "scenes_only",
+            "coverage_detail": (
+                "No cached composites for these windows; final valid overlap along "
+                "the corridor is computed after extract."
+            ),
+        }
+    out = {**base, "earlier_corridor_observed_fraction": earlier_frac, "later_corridor_observed_fraction": later_frac}
+    earlier_cached = _cached(e_start, e_end, sensor)
+    later_cached = _cached(l_start, l_end, sensor)
+    if earlier_cached is not None and later_cached is not None:
+        transform, _width, height, _grid = _base_grid()
+        width = earlier_cached["water"].shape[1]
+        corridor = _river_belt(height, width, transform, 20_000)
+        common = (earlier_cached["observed"] & later_cached["observed"] & corridor).sum()
+        denom = int(corridor.sum())
+        common_frac = float(common) / denom if denom else None
+        out["coverage_status"] = "cached_estimate"
+        out["estimated_common_observed_fraction"] = common_frac
+        out["coverage_detail"] = (
+            "Cached mask fractions along the 20 km river belt "
+            f"(earlier {100 * earlier_frac:.1f}%, later {100 * later_frac:.1f}%"
+            + (f", common {100 * common_frac:.1f}%)" if common_frac is not None else ").")
+            + " Final bankline valid overlap is still computed after extract."
+        )
+        return out
+    out["coverage_status"] = "cached_partial"
+    known = []
+    if earlier_frac is not None:
+        known.append(f"earlier {100 * earlier_frac:.1f}%")
+    if later_frac is not None:
+        known.append(f"later {100 * later_frac:.1f}%")
+    out["coverage_detail"] = (
+        f"Only one window has a cached composite ({', '.join(known)} along the river belt). "
+        "Final valid overlap is computed after extract."
+    )
+    return out
+
+
 def preflight_availability(request) -> dict:
     """Check EE scene availability before a long compute."""
     ee = require_ee()
@@ -1788,6 +1910,7 @@ def preflight_availability(request) -> dict:
 
     earlier = probe_collection(ee, request.sensor, request.earlier, region)
     later = probe_collection(ee, request.sensor, request.later, region)
+    coverage = _preflight_corridor_coverage(request)
     ok = bool(earlier.get("ok") and later.get("ok"))
     return {
         "ok": ok,
@@ -1800,6 +1923,7 @@ def preflight_availability(request) -> dict:
         "archive_start": (
             "2017-03-28" if request.sensor == "optical" else "2014-10-03"
         ),
+        **coverage,
         "detail": None if ok else (earlier.get("detail") if not earlier.get("ok") else later.get("detail")),
     }
 

@@ -62,14 +62,26 @@ function PointTable({ title, tone, rows, total, selectedLat, onSelect }: PointTa
 
 const ROI: Bounds = { west: 89.5, south: 25.5, east: 96, north: 28.5 }
 
-const STEPS: { id: string; label: string }[] = [
-  { id: 'Base optical', label: 'Fetch the start-date optical mask' },
-  { id: 'Base microwave', label: 'Fetch the start-date microwave mask' },
-  { id: 'Current optical', label: 'Fetch the end-date optical mask' },
-  { id: 'Current microwave', label: 'Fetch the end-date microwave mask' },
-  { id: 'Difference', label: 'Build outer envelopes and compare banklines' },
-  { id: 'Points', label: 'Rank expansion and contraction patches' },
-]
+function progressSteps(sensor: 'optical' | 'microwave', mode: 'dates' | 'periods'): { id: string; label: string }[] {
+  const base = mode === 'periods' ? 'base period' : 'start-date'
+  const current = mode === 'periods' ? 'current period' : 'end-date'
+  const optical = [
+    { id: 'Base optical', label: `Fetch the ${base} optical mask` },
+    { id: 'Current optical', label: `Fetch the ${current} optical mask` },
+  ]
+  const microwave = [
+    { id: 'Base microwave', label: `Fetch the ${base} microwave mask` },
+    { id: 'Current microwave', label: `Fetch the ${current} microwave mask` },
+  ]
+  const tail = [
+    { id: 'Difference', label: 'Build outer envelopes and compare banklines' },
+    { id: 'Points', label: 'Rank expansion and contraction patches' },
+  ]
+  if (sensor === 'microwave') {
+    return [...microwave, ...tail]
+  }
+  return [...optical, ...microwave, ...tail]
+}
 
 export default function AnalysisView({ summary }: AnalysisViewProps): React.JSX.Element {
   const [endId, setEndId] = useState('')
@@ -82,6 +94,7 @@ export default function AnalysisView({ summary }: AnalysisViewProps): React.JSX.
   const [laterStart, setLaterStart] = useState('')
   const [laterEnd, setLaterEnd] = useState('')
   const [ackPartial, setAckPartial] = useState(false)
+  const [ackFingerprint, setAckFingerprint] = useState<string | null>(null)
   const [preflightNote, setPreflightNote] = useState<string | null>(null)
   const [change, setChange] = useState<ChangeStats | null>(null)
   const [points, setPoints] = useState<ChangePoints | null>(null)
@@ -101,7 +114,48 @@ export default function AnalysisView({ summary }: AnalysisViewProps): React.JSX.
   const [pick, setPick] = useState<{ lat: number; lon: number } | null>(null)
   const [focus, setFocus] = useState<{ lat: number; lon: number; token: number } | null>(null)
   const [hit, setHit] = useState<IdentifyResult | null>(null)
+  const [resultFingerprint, setResultFingerprint] = useState<string | null>(null)
   const locateToken = useRef(0)
+  const requestGen = useRef(0)
+  const activeComputeGen = useRef(0)
+  const pendingResultFingerprint = useRef<string | null>(null)
+  const resultFingerprintRef = useRef<string | null>(null)
+
+  const normalizeProgressStep = (stepId: string): string => {
+    if (sensor !== 'microwave') return stepId
+    if (stepId === 'Base optical') return 'Base microwave'
+    if (stepId === 'Current optical') return 'Current microwave'
+    return stepId
+  }
+
+  const requestFingerprint = (): string => {
+    if (mode === 'periods') {
+      return `periods|${sensor}|${earlierStart}|${earlierEnd}|${laterStart}|${laterEnd}`
+    }
+    return `dates|${sensor}|${windowDays}|${startId}|${endId}`
+  }
+
+  const clearStaleResult = (): void => {
+    setChange(null)
+    setPoints(null)
+    setHit(null)
+    setPick(null)
+    setFocus(null)
+    setError(null)
+    setPreflightNote(null)
+    setAckPartial(false)
+    setAckFingerprint(null)
+    setResultFingerprint(null)
+    resultFingerprintRef.current = null
+  }
+
+  useEffect(() => {
+    requestGen.current += 1
+    setRunning(false)
+    setStep('')
+    setDetail('')
+    clearStaleResult()
+  }, [sensor, mode, windowDays, startId, endId, earlierStart, earlierEnd, laterStart, laterEnd])
 
   useEffect(() => {
     void api.latest().then((row) => {
@@ -114,23 +168,32 @@ export default function AnalysisView({ summary }: AnalysisViewProps): React.JSX.
 
   useEffect(() => {
     if (!running) return
+    const gen = activeComputeGen.current
     let stop = false
     const read = (): void => {
       void api.computeStatus().then((status: ComputeStatus) => {
-        if (stop) return
-        setStep(status.step)
+        if (stop || activeComputeGen.current !== gen) return
+        setStep(normalizeProgressStep(status.step))
         setDetail(status.detail)
         if (!status.done) return
+        if (activeComputeGen.current !== gen) return
         setRunning(false)
         if (status.error) {
           setError(status.error)
           return
         }
-        if (status.change) setChange(status.change)
+        const fp = pendingResultFingerprint.current ?? requestFingerprint()
+        if (status.change) {
+          setChange(status.change)
+          setResultFingerprint(fp)
+          resultFingerprintRef.current = fp
+        }
         if (status.points) setPoints(status.points)
         setError(null)
       }).catch((err: unknown) => {
-        if (!stop) setError(err instanceof Error ? err.message : 'The progress update failed')
+        if (!stop && activeComputeGen.current === gen) {
+          setError(err instanceof Error ? err.message : 'The progress update failed')
+        }
       })
     }
     read()
@@ -141,6 +204,8 @@ export default function AnalysisView({ summary }: AnalysisViewProps): React.JSX.
     }
   }, [running])
 
+  const ackApplies = ackPartial && ackFingerprint === requestFingerprint()
+
   const requestParams = (): Record<string, string | number | boolean> => {
     if (mode === 'periods') {
       return {
@@ -150,7 +215,7 @@ export default function AnalysisView({ summary }: AnalysisViewProps): React.JSX.
         earlier_end: earlierEnd,
         later_start: laterStart,
         later_end: laterEnd,
-        acknowledge_partial: ackPartial,
+        acknowledge_partial: ackApplies,
       }
     }
     return {
@@ -159,7 +224,7 @@ export default function AnalysisView({ summary }: AnalysisViewProps): React.JSX.
       window_days: windowDays,
       later: endId,
       earlier: startId,
-      acknowledge_partial: ackPartial,
+      acknowledge_partial: ackApplies,
     }
   }
 
@@ -176,18 +241,23 @@ export default function AnalysisView({ summary }: AnalysisViewProps): React.JSX.
       return
     }
     const params = requestParams()
+    const gen = (requestGen.current += 1)
+    activeComputeGen.current = gen
+    pendingResultFingerprint.current = requestFingerprint()
+    clearStaleResult()
     setError(null)
-    setPreflightNote(null)
-    setHit(null)
     setRunning(true)
-    setStep('Base optical')
+    const steps = progressSteps(sensor, mode)
+    setStep(steps[0]?.id ?? (sensor === 'microwave' ? 'Base microwave' : 'Base optical'))
     setDetail('Checking scene availability')
     void api.preflight(params).then((flight) => {
+      if (activeComputeGen.current !== gen) return
       if (!flight.ok) {
         setRunning(false)
         setError(flight.detail || 'No usable scenes for this request')
         return
       }
+      if (activeComputeGen.current !== gen) return
       setPreflightNote(
         `${flight.sensor}: earlier ${flight.earlier.scene_count} scenes (${flight.earlier.earliest_acquisition}→${flight.earlier.latest_acquisition}); `
         + `later ${flight.later.scene_count} scenes (${flight.later.earliest_acquisition}→${flight.later.latest_acquisition}).`,
@@ -195,6 +265,7 @@ export default function AnalysisView({ summary }: AnalysisViewProps): React.JSX.
       setDetail('Starting downloads')
       return api.compute(params)
     }).catch((err: unknown) => {
+      if (activeComputeGen.current !== gen) return
       const message = err instanceof Error ? err.message : 'Compute did not start'
       if (message.toLowerCase().includes('already running')) {
         return
@@ -211,19 +282,28 @@ export default function AnalysisView({ summary }: AnalysisViewProps): React.JSX.
     if (!change) return
     const token = locateToken.current + 1
     locateToken.current = token
+    const gen = requestGen.current
+    const fp = resultFingerprintRef.current
     void api.identify(lon, lat, change.later_id ?? '', change.earlier_id ?? '').then((result) => {
-      if (locateToken.current === token) setHit(result)
+      if (locateToken.current !== token) return
+      if (requestGen.current !== gen) return
+      if (fp != null && resultFingerprintRef.current !== fp) return
+      setHit(result)
     }).catch((err: unknown) => {
-      if (locateToken.current === token) setError(err instanceof Error ? err.message : 'Location lookup failed')
+      if (locateToken.current !== token) return
+      if (requestGen.current !== gen) return
+      if (fp != null && resultFingerprintRef.current !== fp) return
+      setError(err instanceof Error ? err.message : 'Location lookup failed')
     })
   }
 
   const place = hit?.pixel_label
-  const acceptedPartial = !change?.requires_ack || ackPartial
+  const acceptedPartial = !change?.requires_ack || ackApplies
+  const steps = progressSteps(sensor, mode)
   const erosionText = acceptedPartial ? (change?.erosion_display ?? '—') : '—'
   const depositionText = acceptedPartial ? (change?.deposition_display ?? '—') : '—'
   const netText = acceptedPartial ? (change?.net_water_change_display ?? '—') : '—'
-  const activeStep = STEPS.findIndex((item) => item.id === step)
+  const activeStep = steps.findIndex((item) => item.id === normalizeProgressStep(step))
   const showChangeLayers = Boolean(acceptedPartial && change)
 
   return (
@@ -233,14 +313,14 @@ export default function AnalysisView({ summary }: AnalysisViewProps): React.JSX.
         <div className="dates">
           <label className="field">
             Mode
-            <select value={mode} onChange={(event) => setMode(event.target.value as 'dates' | 'periods')}>
+            <select value={mode} onChange={(event) => { setMode(event.target.value as 'dates' | 'periods') }}>
               <option value="dates">Two dates (Mode A)</option>
               <option value="periods">Two periods (Mode B)</option>
             </select>
           </label>
           <label className="field">
             Sensor
-            <select value={sensor} onChange={(event) => setSensor(event.target.value as 'optical' | 'microwave')}>
+            <select value={sensor} onChange={(event) => { setSensor(event.target.value as 'optical' | 'microwave') }}>
               <option value="optical">Sentinel-2 optical (≥2017-03-28)</option>
               <option value="microwave">Sentinel-1 microwave (≥2014-10-03)</option>
             </select>
@@ -249,7 +329,7 @@ export default function AnalysisView({ summary }: AnalysisViewProps): React.JSX.
             <>
               <label className="field">
                 Window
-                <select value={windowDays} onChange={(event) => setWindowDays(Number(event.target.value))}>
+                <select value={windowDays} onChange={(event) => { setWindowDays(Number(event.target.value)) }}>
                   <option value={1}>1 day</option>
                   <option value={15}>15 days</option>
                   <option value={30}>30 days</option>
@@ -280,7 +360,15 @@ export default function AnalysisView({ summary }: AnalysisViewProps): React.JSX.
             : 'Mode B: each period is composited independently. The gap between periods is not filled.'}
         </p>
         <label className="check">
-          <input type="checkbox" checked={ackPartial} onChange={() => setAckPartial((value) => !value)} />
+          <input
+            type="checkbox"
+            checked={ackApplies}
+            onChange={(event) => {
+              const checked = event.target.checked
+              setAckPartial(checked)
+              setAckFingerprint(checked ? requestFingerprint() : null)
+            }}
+          />
           Acknowledge partial corridor coverage (&lt;70% valid)
         </label>
         <button type="button" className="compute" disabled={running || (mode === 'dates' ? !endId : false)} onClick={compute}>
@@ -289,7 +377,7 @@ export default function AnalysisView({ summary }: AnalysisViewProps): React.JSX.
         </button>
         {running && (
           <ol className="steps">
-            {STEPS.map((item, index) => (
+            {steps.map((item, index) => (
               <li key={item.id} className={index < activeStep || step === 'Done' ? 'done' : index === activeStep ? 'active' : ''}>
                 <i />
                 <span>{item.label}{index === activeStep && detail ? ` — ${detail}` : ''}</span>
@@ -320,7 +408,7 @@ export default function AnalysisView({ summary }: AnalysisViewProps): React.JSX.
             Partial coverage warning: valid overlap {(100 * (change.valid_fraction ?? 0)).toFixed(1)}%
             {' '}(threshold {100 * (change.min_valid_fraction ?? 0.7)}%).
             {' '}{change.coverage_warning || 'Do not claim full Brahmaputra coverage.'}
-            {!ackPartial ? ' Tick the acknowledge box above if you accept a partial-corridor result.' : ' Acknowledged.'}
+            {!ackApplies ? ' Tick the acknowledge box above if you accept a partial-corridor result.' : ' Acknowledged.'}
           </p>
         )}
         {change?.transect_qc && (
@@ -389,7 +477,7 @@ export default function AnalysisView({ summary }: AnalysisViewProps): React.JSX.
           focus={focus}
           busy={false}
           onPick={inspect}
-          revision={`${endId}-${startId}`}
+          revision={resultFingerprint ?? requestFingerprint()}
         />
       </div>
     </div>
